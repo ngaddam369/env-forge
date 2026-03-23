@@ -44,7 +44,7 @@ func buildTestServer(t *testing.T, store *environment.Store) *server.Server {
 		steps.NewRegistryStep(),
 		steps.NewHealthStep(),
 	}
-	return server.New(store, allSteps, nil, zerolog.Nop())
+	return server.New(store, allSteps, zerolog.Nop())
 }
 
 func postStep(t *testing.T, srv http.Handler, path, envID string) *httptest.ResponseRecorder {

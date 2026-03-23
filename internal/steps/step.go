@@ -17,7 +17,7 @@ import (
 // runs steps sequentially, but tests may call them concurrently.
 type Step interface {
 	Name() string
-	Execute(ctx context.Context, env *environment.Environment, store *environment.Store) error
-	Compensate(ctx context.Context, env *environment.Environment, store *environment.Store) error
+	Execute(ctx context.Context, env *environment.Environment, store environment.StateWriter) error
+	Compensate(ctx context.Context, env *environment.Environment, store environment.StateWriter) error
 	IsAlreadyDone(ctx context.Context, env *environment.Environment) (bool, error)
 }

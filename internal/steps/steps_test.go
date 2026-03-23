@@ -276,9 +276,13 @@ func TestRegistryStep_DryRun_ExecuteCompensate(t *testing.T) {
 	if err := step.Compensate(context.Background(), env, store); err != nil {
 		t.Fatalf("Compensate: %v", err)
 	}
-	// After compensation the record should be gone.
-	if _, err := store.Get(env.ID); err == nil {
-		t.Error("environment should be deleted from store after registry compensation")
+	// After compensation the record should be marked destroyed (not deleted).
+	updated, err := store.Get(env.ID)
+	if err != nil {
+		t.Fatalf("environment should still exist after compensation: %v", err)
+	}
+	if updated.Status != environment.StatusDestroyed {
+		t.Errorf("expected status=destroyed after compensation, got %s", updated.Status)
 	}
 }
 

@@ -28,7 +28,7 @@ func NewEC2Step(client *ec2.Client) *EC2Step {
 
 func (s *EC2Step) Name() string { return "ec2" }
 
-func (s *EC2Step) Execute(ctx context.Context, env *environment.Environment, store *environment.Store) error {
+func (s *EC2Step) Execute(ctx context.Context, env *environment.Environment, store environment.StateWriter) error {
 	if env.DryRun {
 		time.Sleep(3 * time.Second)
 		env.EC2InstanceID = "i-dryrun-" + env.ID[:8]
@@ -94,7 +94,7 @@ ln -s /opt/spire-1.9.6/bin/spire-agent /usr/local/bin/spire-agent
 	return store.Put(env)
 }
 
-func (s *EC2Step) Compensate(ctx context.Context, env *environment.Environment, store *environment.Store) error {
+func (s *EC2Step) Compensate(ctx context.Context, env *environment.Environment, store environment.StateWriter) error {
 	if env.DryRun {
 		time.Sleep(1 * time.Second)
 		env.EC2InstanceID = ""

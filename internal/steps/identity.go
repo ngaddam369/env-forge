@@ -37,7 +37,7 @@ func NewIdentityStep(svidConn *grpc.ClientConn, trustDomain string) *IdentitySte
 
 func (s *IdentityStep) Name() string { return "identity" }
 
-func (s *IdentityStep) Execute(ctx context.Context, env *environment.Environment, store *environment.Store) error {
+func (s *IdentityStep) Execute(ctx context.Context, env *environment.Environment, store environment.StateWriter) error {
 	if env.DryRun {
 		time.Sleep(1 * time.Second)
 		env.SPIREEntryIDs = []string{"entry-app-dryrun-" + env.ID[:8], "entry-db-dryrun-" + env.ID[:8]}
@@ -81,7 +81,7 @@ func (s *IdentityStep) Execute(ctx context.Context, env *environment.Environment
 	return store.Put(env)
 }
 
-func (s *IdentityStep) Compensate(ctx context.Context, env *environment.Environment, store *environment.Store) error {
+func (s *IdentityStep) Compensate(ctx context.Context, env *environment.Environment, store environment.StateWriter) error {
 	if env.DryRun {
 		time.Sleep(1 * time.Second)
 		env.SPIREEntryIDs = nil

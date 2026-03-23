@@ -82,11 +82,14 @@ spec:
         app: spire-agent
     spec:
       hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: spire-agent
       initContainers:
         # Wait for the SPIRE server to be ready before starting the agent.
         - name: init-server
           image: cgr.dev/chainguard/kubectl:latest
+          imagePullPolicy: Never
           args:
             - wait
             - --namespace=spire

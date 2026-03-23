@@ -30,6 +30,7 @@ spec:
       containers:
         - name: saga-conductor
           image: ghcr.io/ngaddam369/saga-conductor:latest
+          imagePullPolicy: Never
           ports:
             - containerPort: 8080
               name: grpc

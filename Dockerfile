@@ -6,10 +6,10 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /bin/forge ./cmd/forge
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /bin/forge-api ./cmd/forge-api
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
-COPY --from=builder /bin/forge /forge
+COPY --from=builder /bin/forge-api /forge-api
 
-ENTRYPOINT ["/forge"]
+ENTRYPOINT ["/forge-api"]

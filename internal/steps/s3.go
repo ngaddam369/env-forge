@@ -26,7 +26,7 @@ func NewS3Step(client *s3.Client, region string) *S3Step {
 
 func (s *S3Step) Name() string { return "s3" }
 
-func (s *S3Step) Execute(ctx context.Context, env *environment.Environment, store *environment.Store) error {
+func (s *S3Step) Execute(ctx context.Context, env *environment.Environment, store environment.StateWriter) error {
 	if env.DryRun {
 		time.Sleep(1 * time.Second)
 		env.S3BucketName = "env-forge-dryrun-" + env.ID[:8]
@@ -73,7 +73,7 @@ func (s *S3Step) Execute(ctx context.Context, env *environment.Environment, stor
 	return store.Put(env)
 }
 
-func (s *S3Step) Compensate(ctx context.Context, env *environment.Environment, store *environment.Store) error {
+func (s *S3Step) Compensate(ctx context.Context, env *environment.Environment, store environment.StateWriter) error {
 	if env.DryRun {
 		time.Sleep(1 * time.Second)
 		env.S3BucketName = ""

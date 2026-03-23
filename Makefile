@@ -1,4 +1,3 @@
-BINARY      := forge
 MODULE      := github.com/ngaddam369/env-forge
 GOTOOLCHAIN := go1.26.1
 
@@ -6,9 +5,11 @@ export GOTOOLCHAIN
 
 .PHONY: build fmt lint test verify clean tidy vet
 
-## build: compile the forge binary
+## build: compile all binaries (forge-api, forge-worker, forge CLI)
 build:
-	go build -o bin/$(BINARY) ./cmd/forge
+	go build -o bin/forge-api    ./cmd/forge-api
+	go build -o bin/forge-worker ./cmd/forge-worker
+	go build -o bin/forge        ./cmd/forge
 
 ## fmt: format all Go source files in place
 fmt:

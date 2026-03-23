@@ -16,7 +16,7 @@ func NewRegistryStep() *RegistryStep { return &RegistryStep{} }
 
 func (s *RegistryStep) Name() string { return "registry" }
 
-func (s *RegistryStep) Execute(_ context.Context, env *environment.Environment, store *environment.Store) error {
+func (s *RegistryStep) Execute(_ context.Context, env *environment.Environment, store environment.StateWriter) error {
 	if env.DryRun {
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -24,12 +24,9 @@ func (s *RegistryStep) Execute(_ context.Context, env *environment.Environment, 
 	return store.Put(env)
 }
 
-func (s *RegistryStep) Compensate(_ context.Context, env *environment.Environment, store *environment.Store) error {
+func (s *RegistryStep) Compensate(_ context.Context, env *environment.Environment, store environment.StateWriter) error {
 	env.Status = environment.StatusDestroyed
-	if err := store.Put(env); err != nil {
-		return err
-	}
-	return store.Delete(env.ID)
+	return store.Put(env)
 }
 
 func (s *RegistryStep) IsAlreadyDone(_ context.Context, env *environment.Environment) (bool, error) {

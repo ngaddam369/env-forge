@@ -1,0 +1,15 @@
+FROM golang:1.26.1-alpine AS builder
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /bin/forge-worker ./cmd/forge-worker
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=builder /bin/forge-worker /forge-worker
+
+ENTRYPOINT ["/forge-worker"]

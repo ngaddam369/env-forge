@@ -1,0 +1,82 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: forge-api
+  namespace: default
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: forge-api-data
+  namespace: default
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forge-api
+  namespace: default
+  labels:
+    app: forge-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: forge-api
+  template:
+    metadata:
+      labels:
+        app: forge-api
+    spec:
+      serviceAccountName: forge-api
+      containers:
+        - name: forge-api
+          image: ghcr.io/ngaddam369/env-forge-api:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 9090
+              name: api
+          env:
+            - name: STEP_ADDR
+              value: ":9090"
+            - name: DB_PATH
+              value: /data/env-forge.db
+            - name: CONDUCTOR_ADDR
+              value: "saga-conductor.default.svc.cluster.local:8080"
+            - name: FORGE_WORKER_URL
+              value: "http://forge-worker.default.svc.cluster.local:9091"
+            - name: SVIDEXCHANGE_JWKS_URL
+              value: "http://svid-exchange.default.svc.cluster.local:8081/jwks"
+            - name: TRUST_DOMAIN
+              value: "cluster.local"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 9090
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: forge-api-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: forge-api
+  namespace: default
+spec:
+  selector:
+    app: forge-api
+  ports:
+    - name: api
+      port: 9090
+      targetPort: 9090

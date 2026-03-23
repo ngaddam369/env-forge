@@ -31,14 +31,25 @@ data:
   policy.yaml: |
     # Exchange policies for env-forge provisioned environments.
     # Dynamic policies are added via the admin gRPC API (identity step).
-    # The placeholder entry below satisfies the startup validation requirement;
-    # it uses an unreachable SPIFFE ID so it will never match real requests.
     policies:
+      # forge-worker exchanges its SVID for a JWT to call forge-api internal endpoints.
+      - name: forge-worker-to-forge-api
+        subject: "spiffe://cluster.local/ns/default/sa/forge-worker"
+        target:  "spiffe://cluster.local/ns/default/sa/forge-api"
+        allowed_scopes: ["env:read", "env:write"]
+        max_ttl: 3600
+      # Placeholder satisfies startup validation; uses unreachable IDs so it never matches.
       - name: placeholder
         subject: "spiffe://cluster.local/placeholder/unused"
         target:  "spiffe://cluster.local/placeholder/unused"
         allowed_scopes: ["placeholder"]
         max_ttl: 1
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: svid-exchange
+  namespace: default
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -57,9 +68,11 @@ spec:
       labels:
         app: svid-exchange
     spec:
+      serviceAccountName: svid-exchange
       containers:
         - name: svid-exchange
           image: ghcr.io/ngaddam369/svid-exchange:latest
+          imagePullPolicy: Never
           ports:
             - containerPort: 8080
               name: grpc
@@ -84,7 +97,7 @@ spec:
             httpGet:
               path: /health/live
               port: 8081
-            initialDelaySeconds: 5
+            initialDelaySeconds: 60
             periodSeconds: 10
       volumes:
         - name: data

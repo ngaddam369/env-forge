@@ -78,8 +78,10 @@ data:
         }
       }
 
-      KeyManager "memory" {
-        plugin_data {}
+      KeyManager "disk" {
+        plugin_data {
+          keys_path = "/run/spire/data/keys.json"
+        }
       }
 
       Notifier "k8sbundle" {
@@ -128,7 +130,11 @@ spec:
               readOnly: false
           livenessProbe:
             exec:
-              command: [/opt/spire/bin/spire-server, healthcheck]
+              command:
+                - /opt/spire/bin/spire-server
+                - healthcheck
+                - -socketPath
+                - /run/spire/sockets/api.sock
             initialDelaySeconds: 15
             periodSeconds: 60
       volumes:

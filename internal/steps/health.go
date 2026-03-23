@@ -27,7 +27,7 @@ func NewHealthStep() *HealthStep {
 
 func (s *HealthStep) Name() string { return "health" }
 
-func (s *HealthStep) Execute(ctx context.Context, env *environment.Environment, _ *environment.Store) error {
+func (s *HealthStep) Execute(ctx context.Context, env *environment.Environment, _ environment.StateWriter) error {
 	// Demo moment 2: inject failure for compensation cascade demo.
 	if env.FailAtHealth {
 		return fmt.Errorf("injected health failure for demo (--fail-at-health)")
@@ -66,7 +66,7 @@ func checkRDS(ctx context.Context, endpoint, password string) error {
 }
 
 // Compensate is a no-op — health validation is read-only.
-func (s *HealthStep) Compensate(_ context.Context, _ *environment.Environment, _ *environment.Store) error {
+func (s *HealthStep) Compensate(_ context.Context, _ *environment.Environment, _ environment.StateWriter) error {
 	return nil
 }
 

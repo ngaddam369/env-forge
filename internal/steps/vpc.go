@@ -25,7 +25,7 @@ func NewVPCStep(client *ec2.Client) *VPCStep {
 
 func (s *VPCStep) Name() string { return "vpc" }
 
-func (s *VPCStep) Execute(ctx context.Context, env *environment.Environment, store *environment.Store) error {
+func (s *VPCStep) Execute(ctx context.Context, env *environment.Environment, store environment.StateWriter) error {
 	if env.DryRun {
 		time.Sleep(2 * time.Second)
 		env.VPCID = "vpc-dryrun-" + env.ID[:8]
@@ -120,7 +120,7 @@ func (s *VPCStep) Execute(ctx context.Context, env *environment.Environment, sto
 	return store.Put(env)
 }
 
-func (s *VPCStep) Compensate(ctx context.Context, env *environment.Environment, store *environment.Store) error {
+func (s *VPCStep) Compensate(ctx context.Context, env *environment.Environment, store environment.StateWriter) error {
 	if env.DryRun {
 		time.Sleep(1 * time.Second)
 		env.SecurityGroupID = ""

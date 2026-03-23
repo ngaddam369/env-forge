@@ -15,6 +15,20 @@ var (
 	bucketName  = []byte("environments")
 )
 
+// StateWriter is the minimal interface steps need to persist environment state.
+// *Store satisfies this interface.
+type StateWriter interface {
+	Put(env *Environment) error
+}
+
+// StateClient extends StateWriter with read access. Used by server handlers that
+// need to load an environment before passing it to a step.
+// *Store satisfies this interface.
+type StateClient interface {
+	StateWriter
+	Get(id string) (*Environment, error)
+}
+
 // Store is a BoltDB-backed persistence layer for Environments.
 // All methods are safe for concurrent use — BoltDB serialises writes internally.
 type Store struct {

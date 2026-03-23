@@ -27,7 +27,7 @@ func NewRDSStep(client *rds.Client) *RDSStep {
 
 func (s *RDSStep) Name() string { return "rds" }
 
-func (s *RDSStep) Execute(ctx context.Context, env *environment.Environment, store *environment.Store) error {
+func (s *RDSStep) Execute(ctx context.Context, env *environment.Environment, store environment.StateWriter) error {
 	if env.DryRun {
 		env.RDSInstanceID = "db-dryrun-" + env.ID[:8]
 		env.RDSEndpoint = "db-dryrun-" + env.ID[:8] + ".us-east-1.rds.amazonaws.com:5432"
@@ -97,7 +97,7 @@ func (s *RDSStep) Execute(ctx context.Context, env *environment.Environment, sto
 	return store.Put(env)
 }
 
-func (s *RDSStep) Compensate(ctx context.Context, env *environment.Environment, store *environment.Store) error {
+func (s *RDSStep) Compensate(ctx context.Context, env *environment.Environment, store environment.StateWriter) error {
 	if env.DryRun {
 		time.Sleep(2 * time.Second)
 		env.RDSInstanceID = ""

@@ -48,7 +48,7 @@ func NewConfigStep(client *s3.Client, svidExchangeAddr, trustDomain, localEnvDir
 
 func (s *ConfigStep) Name() string { return "config" }
 
-func (s *ConfigStep) Execute(ctx context.Context, env *environment.Environment, store *environment.Store) error {
+func (s *ConfigStep) Execute(ctx context.Context, env *environment.Environment, store environment.StateWriter) error {
 	cfg := envConfig{
 		EnvID:            env.ID,
 		RDSEndpoint:      env.RDSEndpoint,
@@ -97,7 +97,7 @@ func (s *ConfigStep) Execute(ctx context.Context, env *environment.Environment, 
 	return store.Put(env)
 }
 
-func (s *ConfigStep) Compensate(ctx context.Context, env *environment.Environment, store *environment.Store) error {
+func (s *ConfigStep) Compensate(ctx context.Context, env *environment.Environment, store environment.StateWriter) error {
 	if !env.DryRun && env.S3BucketName != "" {
 		if _, err := s.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
 			Bucket: aws.String(env.S3BucketName),

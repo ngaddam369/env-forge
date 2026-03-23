@@ -16,14 +16,9 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
-	awsclients "github.com/ngaddam369/env-forge/internal/aws"
 	"github.com/ngaddam369/env-forge/internal/conductor"
 	"github.com/ngaddam369/env-forge/internal/environment"
-	"github.com/ngaddam369/env-forge/internal/server"
-	"github.com/ngaddam369/env-forge/internal/steps"
 )
 
 func main() {
@@ -32,10 +27,9 @@ func main() {
 
 	root := &cobra.Command{
 		Use:   "forge",
-		Short: "env-forge — provision isolated AWS developer environments via saga-conductor",
+		Short: "env-forge CLI — provision isolated AWS developer environments",
 	}
 	root.AddCommand(
-		newServeCmd(),
 		newCreateCmd(),
 		newDestroyCmd(),
 		newListCmd(),
@@ -44,76 +38,6 @@ func main() {
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
-}
-
-// ── serve ────────────────────────────────────────────────────────────────────
-
-func newServeCmd() *cobra.Command {
-	var (
-		addr          string
-		dbPath        string
-		svidAddr      string
-		trustDomain   string
-		conductorAddr string
-		selfURL       string
-	)
-	cmd := &cobra.Command{
-		Use:   "serve",
-		Short: "Start the step HTTP server (saga-conductor calls this)",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-			defer stop()
-
-			store, err := environment.Open(dbPath)
-			if err != nil {
-				return fmt.Errorf("open store: %w", err)
-			}
-			defer store.Close() //nolint:errcheck
-
-			// Load AWS clients only when credentials are available.
-			var awsC *awsclients.Clients
-			if os.Getenv("AWS_REGION") != "" {
-				awsC, err = awsclients.LoadClients(ctx)
-				if err != nil {
-					log.Warn().Err(err).Msg("AWS clients unavailable — steps will fail unless dry-run mode was used at create time")
-				}
-			}
-
-			// gRPC connection to svid-exchange admin API.
-			var svidConn *grpc.ClientConn
-			if svidAddr != "" {
-				svidConn, err = grpc.NewClient(svidAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-				if err != nil {
-					return fmt.Errorf("dial svid-exchange: %w", err)
-				}
-				defer svidConn.Close() //nolint:errcheck
-			}
-
-			allSteps := buildSteps(awsC, svidConn, trustDomain)
-
-			// Conductor client enables the POST /envs/create admin endpoint.
-			var provisioner server.Provisioner
-			if conductorAddr != "" {
-				c, err := conductor.New(conductorAddr, selfURL)
-				if err != nil {
-					return fmt.Errorf("connect to conductor: %w", err)
-				}
-				defer c.Close() //nolint:errcheck
-				provisioner = &conductorProvisioner{c: c}
-			}
-
-			srv := server.New(store, allSteps, provisioner, log.Logger)
-			log.Info().Str("addr", addr).Msg("step server listening")
-			return srv.ListenAndServe(ctx, addr)
-		},
-	}
-	cmd.Flags().StringVar(&addr, "addr", envOrDefault("STEP_ADDR", ":9090"), "HTTP listen address")
-	cmd.Flags().StringVar(&dbPath, "db", envOrDefault("DB_PATH", "env-forge.db"), "BoltDB path")
-	cmd.Flags().StringVar(&svidAddr, "svid-exchange-addr", envOrDefault("SVIDEXCHANGE_ADDR", ""), "svid-exchange admin gRPC address")
-	cmd.Flags().StringVar(&trustDomain, "trust-domain", envOrDefault("TRUST_DOMAIN", "cluster.local"), "SPIFFE trust domain")
-	cmd.Flags().StringVar(&conductorAddr, "conductor", envOrDefault("CONDUCTOR_ADDR", "localhost:8080"), "saga-conductor gRPC address")
-	cmd.Flags().StringVar(&selfURL, "self-url", envOrDefault("SELF_URL", "http://localhost:9090"), "This server's HTTP base URL (reachable by conductor)")
-	return cmd
 }
 
 // ── create ───────────────────────────────────────────────────────────────────
@@ -143,7 +67,7 @@ func newCreateCmd() *cobra.Command {
 
 			resp, err := http.Post(forgeURL+"/envs/create", "application/json", bytes.NewReader(reqBody))
 			if err != nil {
-				return fmt.Errorf("POST /envs/create: %w (is forge serve running at %s?)", err, forgeURL)
+				return fmt.Errorf("POST /envs/create: %w (is forge-api running at %s?)", err, forgeURL)
 			}
 			defer resp.Body.Close() //nolint:errcheck
 
@@ -196,9 +120,9 @@ func newCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&owner, "owner", "", "Owner name (required)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Simulate AWS calls with delays instead of real API calls")
 	cmd.Flags().BoolVar(&failAtHealth, "fail-at-health", false, "Inject failure at health validation step (demo moment 2)")
-	cmd.Flags().StringVar(&forgeURL, "forge-url", envOrDefault("SELF_URL", "http://localhost:9090"), "forge serve HTTP base URL")
+	cmd.Flags().StringVar(&forgeURL, "forge-url", envOrDefault("FORGE_URL", "http://localhost:9090"), "forge-api HTTP base URL")
 	if err := cmd.MarkFlagRequired("owner"); err != nil {
-		panic(err) // only fails if "owner" flag was not registered above
+		panic(err)
 	}
 	return cmd
 }
@@ -206,33 +130,34 @@ func newCreateCmd() *cobra.Command {
 // ── destroy ──────────────────────────────────────────────────────────────────
 
 func newDestroyCmd() *cobra.Command {
-	var dbPath string
+	var forgeURL string
 	cmd := &cobra.Command{
 		Use:   "destroy <env-id-prefix>",
 		Short: "Destroy a provisioned environment (triggers saga compensation)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := environment.OpenReadOnly(dbPath)
+			r, err := http.Get(forgeURL + "/envs/" + args[0]) //nolint:noctx
 			if err != nil {
-				return fmt.Errorf("open store: %w", err)
+				return fmt.Errorf("get environment: %w", err)
 			}
-			defer store.Close() //nolint:errcheck
-
-			env, err := resolveEnv(store, args[0])
-			if err != nil {
-				return err
+			var env environment.Environment
+			decodeErr := json.NewDecoder(r.Body).Decode(&env)
+			r.Body.Close() //nolint:errcheck
+			if decodeErr != nil {
+				return fmt.Errorf("decode env: %w", decodeErr)
 			}
-
+			if r.StatusCode == http.StatusNotFound {
+				return fmt.Errorf("environment %q not found", args[0])
+			}
 			if env.SagaID == "" {
 				return fmt.Errorf("environment %s has no associated saga", env.ID[:8])
 			}
-
 			fmt.Printf("Destroying environment %s — saga %s will be aborted.\n", env.ID[:8], env.SagaID)
 			fmt.Println("(Use `forge status <env-id>` to monitor compensation progress.)")
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&dbPath, "db", envOrDefault("DB_PATH", "env-forge.db"), "BoltDB path")
+	cmd.Flags().StringVar(&forgeURL, "forge-url", envOrDefault("FORGE_URL", "http://localhost:9090"), "forge-api HTTP base URL")
 	return cmd
 }
 
@@ -240,24 +165,26 @@ func newDestroyCmd() *cobra.Command {
 
 func newListCmd() *cobra.Command {
 	var (
-		dbPath string
-		status string
+		forgeURL string
+		status   string
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List all environments",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			store, err := environment.OpenReadOnly(dbPath)
-			if err != nil {
-				return fmt.Errorf("open store: %w", err)
+			url := forgeURL + "/envs"
+			if status != "" {
+				url += "?status=" + status
 			}
-			defer store.Close() //nolint:errcheck
-
-			envs, err := store.List(status)
+			resp, err := http.Get(url) //nolint:noctx
 			if err != nil {
-				return err
+				return fmt.Errorf("list environments: %w", err)
 			}
-
+			defer resp.Body.Close() //nolint:errcheck
+			var envs []*environment.Environment
+			if err := json.NewDecoder(resp.Body).Decode(&envs); err != nil {
+				return fmt.Errorf("decode response: %w", err)
+			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 			fmt.Fprintln(w, "ID\tOWNER\tSTATUS\tDRY-RUN\tCREATED") //nolint:errcheck
 			for _, e := range envs {
@@ -269,7 +196,7 @@ func newListCmd() *cobra.Command {
 			return w.Flush()
 		},
 	}
-	cmd.Flags().StringVar(&dbPath, "db", envOrDefault("DB_PATH", "env-forge.db"), "BoltDB path")
+	cmd.Flags().StringVar(&forgeURL, "forge-url", envOrDefault("FORGE_URL", "http://localhost:9090"), "forge-api HTTP base URL")
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status (provisioning|ready|failed|destroyed)")
 	return cmd
 }
@@ -278,7 +205,7 @@ func newListCmd() *cobra.Command {
 
 func newStatusCmd() *cobra.Command {
 	var (
-		dbPath        string
+		forgeURL      string
 		conductorAddr string
 	)
 	cmd := &cobra.Command{
@@ -289,15 +216,15 @@ func newStatusCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 
-			store, err := environment.OpenReadOnly(dbPath)
+			r, err := http.Get(forgeURL + "/envs/" + args[0]) //nolint:noctx
 			if err != nil {
-				return fmt.Errorf("open store: %w", err)
+				return fmt.Errorf("get environment: %w", err)
 			}
-			defer store.Close() //nolint:errcheck
-
-			env, err := resolveEnv(store, args[0])
-			if err != nil {
-				return err
+			var env environment.Environment
+			decodeErr := json.NewDecoder(r.Body).Decode(&env)
+			r.Body.Close() //nolint:errcheck
+			if decodeErr != nil {
+				return fmt.Errorf("decode env: %w", decodeErr)
 			}
 
 			fmt.Printf("Environment: %s\n", env.ID)
@@ -325,68 +252,13 @@ func newStatusCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&dbPath, "db", envOrDefault("DB_PATH", "env-forge.db"), "BoltDB path")
+	cmd.Flags().StringVar(&forgeURL, "forge-url", envOrDefault("FORGE_URL", "http://localhost:9090"), "forge-api HTTP base URL")
 	cmd.Flags().StringVar(&conductorAddr, "conductor", envOrDefault("CONDUCTOR_ADDR", ""), "saga-conductor gRPC address (optional)")
 	return cmd
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-// conductorProvisioner adapts *conductor.Client to the server.Provisioner interface.
-type conductorProvisioner struct{ c *conductor.Client }
-
-func (p *conductorProvisioner) Provision(ctx context.Context, env *environment.Environment) error {
-	_, err := p.c.Provision(ctx, env)
-	return err
-}
-
-// buildSteps constructs the ordered slice of saga steps. When awsC is nil
-// (no AWS credentials), steps will use dry-run mode based on env.DryRun.
-func buildSteps(awsC *awsclients.Clients, svidConn *grpc.ClientConn, trustDomain string) []steps.Step {
-	svidExchangeAddr := envOrDefault("SVIDEXCHANGE_ADDR", "")
-	localEnvDir := envOrDefault("LOCAL_ENV_DIR", ".")
-	region := envOrDefault("AWS_REGION", "us-east-1")
-
-	if awsC != nil {
-		region = awsC.Region
-	}
-
-	return []steps.Step{
-		steps.NewVPCStep(awsClients(awsC).EC2),
-		steps.NewRDSStep(awsClients(awsC).RDS),
-		steps.NewEC2Step(awsClients(awsC).EC2),
-		steps.NewS3Step(awsClients(awsC).S3, region),
-		steps.NewIdentityStep(svidConn, trustDomain),
-		steps.NewConfigStep(awsClients(awsC).S3, svidExchangeAddr, trustDomain, localEnvDir),
-		steps.NewHealthStep(),
-		steps.NewRegistryStep(),
-	}
-}
-
-// awsClients returns awsC if non-nil, otherwise a zero-value Clients so callers
-// can safely access nil EC2/RDS/S3 fields (steps check env.DryRun first).
-func awsClients(c *awsclients.Clients) *awsclients.Clients {
-	if c != nil {
-		return c
-	}
-	return &awsclients.Clients{}
-}
-
-// resolveEnv finds an environment whose ID starts with the given prefix.
-func resolveEnv(store *environment.Store, prefix string) (*environment.Environment, error) {
-	envs, err := store.List("")
-	if err != nil {
-		return nil, fmt.Errorf("list environments: %w", err)
-	}
-	for _, e := range envs {
-		if len(e.ID) >= len(prefix) && e.ID[:len(prefix)] == prefix {
-			return e, nil
-		}
-	}
-	return nil, fmt.Errorf("environment with prefix %q not found", prefix)
-}
-
-// printSagaSteps prints a step-by-step execution trace for a saga.
 func printSagaSteps(exec *pb.SagaExecution) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "  STEP\tSTATUS\tSTARTED\tCOMPLETED\tERROR") //nolint:errcheck
