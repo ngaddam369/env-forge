@@ -1,0 +1,104 @@
+---
+# AWS credentials secret — populate with your keys before applying.
+# kubectl create secret generic aws-creds \
+#   --from-literal=AWS_ACCESS_KEY_ID=<key> \
+#   --from-literal=AWS_SECRET_ACCESS_KEY=<secret> \
+#   --from-literal=AWS_REGION=us-east-1
+#
+# Or for dry-run mode, the secret is not required — omit it from the env section.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: env-forge-data
+  namespace: default
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: env-forge
+  namespace: default
+  labels:
+    app: env-forge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: env-forge
+  template:
+    metadata:
+      labels:
+        app: env-forge
+    spec:
+      containers:
+        - name: env-forge
+          image: ghcr.io/ngaddam369/env-forge:latest
+          args:
+            - serve
+          ports:
+            - containerPort: 9090
+              name: steps
+          env:
+            - name: STEP_ADDR
+              value: ":9090"
+            - name: DB_PATH
+              value: /data/env-forge.db
+            - name: CONDUCTOR_ADDR
+              value: "saga-conductor.default.svc.cluster.local:8080"
+            - name: SELF_URL
+              value: "http://env-forge.default.svc.cluster.local:9090"
+            - name: SVIDEXCHANGE_ADDR
+              value: "svid-exchange.default.svc.cluster.local:8080"
+            - name: TRUST_DOMAIN
+              value: "cluster.local"
+            - name: LOCAL_ENV_DIR
+              value: /data/envfiles
+            # AWS credentials — remove if using --dry-run only
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: aws-creds
+                  key: AWS_ACCESS_KEY_ID
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aws-creds
+                  key: AWS_SECRET_ACCESS_KEY
+                  optional: true
+            - name: AWS_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: aws-creds
+                  key: AWS_REGION
+                  optional: true
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 9090
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: env-forge-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: env-forge
+  namespace: default
+spec:
+  selector:
+    app: env-forge
+  ports:
+    - name: steps
+      port: 9090
+      targetPort: 9090
