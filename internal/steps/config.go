@@ -80,6 +80,9 @@ func (s *ConfigStep) Execute(ctx context.Context, env *environment.Environment, 
 	}
 
 	// Write local .env file.
+	if err := os.MkdirAll(s.localEnvDir, 0o755); err != nil {
+		return fmt.Errorf("create local env dir: %w", err)
+	}
 	envPath := filepath.Join(s.localEnvDir, "env-"+env.ID[:8]+".env")
 	envContent := fmt.Sprintf(
 		"ENV_ID=%s\nRDS_ENDPOINT=%s\nRDS_PASSWORD=%s\nS3_BUCKET=%s\nSPIFFE_SOCKET=%s\nSVID_EXCHANGE_ADDR=%s\nJWKS_URL=%s\n",

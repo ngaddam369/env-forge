@@ -1,6 +1,6 @@
 # env-forge
 
-Arc 1 demo platform. Provisions isolated AWS developer environments (VPC, RDS, EC2, S3) via saga orchestration — every step is reversible. Demonstrates saga-conductor (distributed transactions) and svid-exchange (zero-trust token exchange) working together in a Kubernetes-native deployment.
+Demo platform. Provisions isolated AWS developer environments (VPC, RDS, EC2, S3) via saga orchestration — every step is reversible. Demonstrates saga-conductor (distributed transactions) and svid-exchange (zero-trust token exchange) working together in a Kubernetes-native deployment.
 
 ## Architecture
 

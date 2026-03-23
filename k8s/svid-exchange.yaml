@@ -13,14 +13,32 @@ spec:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: svid-exchange-policy
+  name: svid-exchange-config
   namespace: default
 data:
+  server.yaml: |
+    grpc_addr:   ":8080"
+    health_addr: ":8081"
+    admin_addr:  ":8082"
+    grpc_reflection: false
+    otlp_endpoint: ""
+    grpc_max_concurrent_streams: 100
+    grpc_max_recv_msg_size_kb:   4096
+    rate_limit_rps:   0
+    rate_limit_burst: 0
+    key_rotation_interval: ""
+    admin_subjects: []
   policy.yaml: |
     # Exchange policies for env-forge provisioned environments.
-    # Dynamic policies are added via the admin gRPC API (Step 5).
-    # This file serves as the base policy — typically empty for env-forge.
-    policies: []
+    # Dynamic policies are added via the admin gRPC API (identity step).
+    # The placeholder entry below satisfies the startup validation requirement;
+    # it uses an unreachable SPIFFE ID so it will never match real requests.
+    policies:
+      - name: placeholder
+        subject: "spiffe://cluster.local/placeholder/unused"
+        target:  "spiffe://cluster.local/placeholder/unused"
+        allowed_scopes: ["placeholder"]
+        max_ttl: 1
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -47,18 +65,21 @@ spec:
               name: grpc
             - containerPort: 8081
               name: health
+            - containerPort: 8082
+              name: admin
           env:
-            - name: GRPC_ADDR
-              value: ":8080"
-            - name: HEALTH_ADDR
-              value: ":8081"
             - name: POLICY_FILE
               value: /config/policy.yaml
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix:///run/spire/sockets/agent.sock"
           volumeMounts:
             - name: data
               mountPath: /data
-            - name: policy
+            - name: config
               mountPath: /config
+            - name: spire-agent-socket
+              mountPath: /run/spire/sockets
+              readOnly: true
           livenessProbe:
             httpGet:
               path: /health/live
@@ -69,9 +90,13 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: svid-exchange-data
-        - name: policy
+        - name: config
           configMap:
-            name: svid-exchange-policy
+            name: svid-exchange-config
+        - name: spire-agent-socket
+          hostPath:
+            path: /run/spire/sockets
+            type: Directory
 ---
 apiVersion: v1
 kind: Service
@@ -88,3 +113,6 @@ spec:
     - name: health
       port: 8081
       targetPort: 8081
+    - name: admin
+      port: 8082
+      targetPort: 8082

@@ -52,7 +52,7 @@ spec:
             - name: SELF_URL
               value: "http://env-forge.default.svc.cluster.local:9090"
             - name: SVIDEXCHANGE_ADDR
-              value: "svid-exchange.default.svc.cluster.local:8080"
+              value: "svid-exchange.default.svc.cluster.local:8082"
             - name: TRUST_DOMAIN
               value: "cluster.local"
             - name: LOCAL_ENV_DIR
