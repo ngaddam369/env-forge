@@ -22,7 +22,7 @@ type Store struct {
 }
 
 // Open opens (or creates) the BoltDB file at path and ensures the environments
-// bucket exists.
+// bucket exists. Only one process may hold a write-mode open at a time.
 func Open(path string) (*Store, error) {
 	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 5 * time.Second})
 	if err != nil {
@@ -33,6 +33,16 @@ func Open(path string) (*Store, error) {
 		return err
 	}); err != nil {
 		return nil, fmt.Errorf("create bucket: %w", err)
+	}
+	return &Store{db: db}, nil
+}
+
+// OpenReadOnly opens the BoltDB file in read-only mode. Multiple processes
+// may hold a read-only open concurrently, even alongside a write-mode open.
+func OpenReadOnly(path string) (*Store, error) {
+	db, err := bolt.Open(path, 0o600, &bolt.Options{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("open bolt db (read-only): %w", err)
 	}
 	return &Store{db: db}, nil
 }

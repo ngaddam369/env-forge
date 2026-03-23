@@ -50,6 +50,10 @@ func (s *IdentityStep) Execute(ctx context.Context, env *environment.Environment
 	dbSPIFFEID := fmt.Sprintf("spiffe://%s/env-%s/db-proxy", s.trustDomain, shortID)
 	policyName := "policy-env-" + shortID
 
+	if s.svidConn == nil {
+		return fmt.Errorf("svid-exchange connection not configured (set SVIDEXCHANGE_ADDR)")
+	}
+
 	// Create svid-exchange policy allowing the app to exchange tokens for db-proxy.
 	adminClient := adminv1.NewPolicyAdminClient(s.svidConn)
 	_, err := adminClient.CreatePolicy(ctx, &adminv1.CreatePolicyRequest{
@@ -86,6 +90,9 @@ func (s *IdentityStep) Compensate(ctx context.Context, env *environment.Environm
 	}
 
 	if env.SVIDExchangePolicyName != "" {
+		if s.svidConn == nil {
+			return fmt.Errorf("svid-exchange connection not configured (set SVIDEXCHANGE_ADDR)")
+		}
 		adminClient := adminv1.NewPolicyAdminClient(s.svidConn)
 		if _, err := adminClient.DeletePolicy(ctx, &adminv1.DeletePolicyRequest{
 			Name: env.SVIDExchangePolicyName,

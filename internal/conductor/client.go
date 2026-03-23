@@ -88,7 +88,7 @@ func (c *Client) buildStepDefs() []*pb.StepDefinition {
 		{"s3", "/steps/s3", "/steps/s3/compensate", 60},
 		{"identity", "/steps/identity", "/steps/identity/compensate", 60},
 		{"config", "/steps/config", "/steps/config/compensate", 60},
-		{"health", "/steps/health", "", 60},
+		{"health", "/steps/health", "/steps/health/compensate", 60},
 		{"registry", "/steps/registry", "/steps/registry/compensate", 30},
 	}
 

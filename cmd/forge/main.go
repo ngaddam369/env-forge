@@ -1,15 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
-	"github.com/google/uuid"
 	pb "github.com/ngaddam369/saga-conductor/proto/saga/v1"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -48,10 +50,12 @@ func main() {
 
 func newServeCmd() *cobra.Command {
 	var (
-		addr        string
-		dbPath      string
-		svidAddr    string
-		trustDomain string
+		addr          string
+		dbPath        string
+		svidAddr      string
+		trustDomain   string
+		conductorAddr string
+		selfURL       string
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -87,7 +91,18 @@ func newServeCmd() *cobra.Command {
 
 			allSteps := buildSteps(awsC, svidConn, trustDomain)
 
-			srv := server.New(store, allSteps, log.Logger)
+			// Conductor client enables the POST /envs/create admin endpoint.
+			var provisioner server.Provisioner
+			if conductorAddr != "" {
+				c, err := conductor.New(conductorAddr, selfURL)
+				if err != nil {
+					return fmt.Errorf("connect to conductor: %w", err)
+				}
+				defer c.Close() //nolint:errcheck
+				provisioner = &conductorProvisioner{c: c}
+			}
+
+			srv := server.New(store, allSteps, provisioner, log.Logger)
 			log.Info().Str("addr", addr).Msg("step server listening")
 			return srv.ListenAndServe(ctx, addr)
 		},
@@ -96,6 +111,8 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&dbPath, "db", envOrDefault("DB_PATH", "env-forge.db"), "BoltDB path")
 	cmd.Flags().StringVar(&svidAddr, "svid-exchange-addr", envOrDefault("SVIDEXCHANGE_ADDR", ""), "svid-exchange admin gRPC address")
 	cmd.Flags().StringVar(&trustDomain, "trust-domain", envOrDefault("TRUST_DOMAIN", "cluster.local"), "SPIFFE trust domain")
+	cmd.Flags().StringVar(&conductorAddr, "conductor", envOrDefault("CONDUCTOR_ADDR", "localhost:8080"), "saga-conductor gRPC address")
+	cmd.Flags().StringVar(&selfURL, "self-url", envOrDefault("SELF_URL", "http://localhost:9090"), "This server's HTTP base URL (reachable by conductor)")
 	return cmd
 }
 
@@ -103,12 +120,10 @@ func newServeCmd() *cobra.Command {
 
 func newCreateCmd() *cobra.Command {
 	var (
-		owner         string
-		dryRun        bool
-		failAtHealth  bool
-		dbPath        string
-		conductorAddr string
-		selfURL       string
+		owner        string
+		dryRun       bool
+		failAtHealth bool
+		forgeURL     string
 	)
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -117,49 +132,71 @@ func newCreateCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 
-			store, err := environment.Open(dbPath)
+			reqBody, err := json.Marshal(map[string]any{
+				"owner":          owner,
+				"dry_run":        dryRun,
+				"fail_at_health": failAtHealth,
+			})
 			if err != nil {
-				return fmt.Errorf("open store: %w", err)
-			}
-			defer store.Close() //nolint:errcheck
-
-			env := &environment.Environment{
-				ID:           uuid.New().String(),
-				Owner:        owner,
-				Status:       environment.StatusProvisioning,
-				DryRun:       dryRun,
-				FailAtHealth: failAtHealth,
-				CreatedAt:    time.Now().UTC(),
-			}
-			if err := store.Put(env); err != nil {
-				return fmt.Errorf("save environment: %w", err)
+				return fmt.Errorf("marshal request: %w", err)
 			}
 
-			c, err := conductor.New(conductorAddr, selfURL)
+			resp, err := http.Post(forgeURL+"/envs/create", "application/json", bytes.NewReader(reqBody))
 			if err != nil {
-				return fmt.Errorf("connect to conductor: %w", err)
+				return fmt.Errorf("POST /envs/create: %w (is forge serve running at %s?)", err, forgeURL)
 			}
-			defer c.Close() //nolint:errcheck
+			defer resp.Body.Close() //nolint:errcheck
 
-			fmt.Printf("Provisioning environment %s (owner: %s, dry-run: %v)\n", env.ID, owner, dryRun)
-			fmt.Printf("Saga starting — run `forge status %s` to monitor.\n\n", env.ID[:8])
-
-			exec, err := c.Provision(ctx, env)
-			if err != nil {
-				return fmt.Errorf("provision failed: %w", err)
+			if resp.StatusCode != http.StatusAccepted {
+				var msg [512]byte
+				n, err := resp.Body.Read(msg[:])
+				if err != nil && n == 0 {
+					return fmt.Errorf("create failed (%d)", resp.StatusCode)
+				}
+				return fmt.Errorf("create failed (%d): %s", resp.StatusCode, string(msg[:n]))
 			}
 
-			fmt.Printf("Environment %s — saga status: %s\n", env.ID[:8], exec.Status)
-			printSagaSteps(exec)
-			return nil
+			var created struct {
+				EnvID string `json:"env_id"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+				return fmt.Errorf("decode response: %w", err)
+			}
+
+			fmt.Printf("Provisioning environment %s (owner: %s, dry-run: %v)\n", created.EnvID[:8], owner, dryRun)
+			fmt.Printf("Watching for completion...\n\n")
+
+			// Poll /envs/{id} until the saga reaches a terminal state.
+			for {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(2 * time.Second):
+				}
+
+				r, err := http.Get(forgeURL + "/envs/" + created.EnvID) //nolint:noctx
+				if err != nil {
+					return fmt.Errorf("poll status: %w", err)
+				}
+				var env environment.Environment
+				decodeErr := json.NewDecoder(r.Body).Decode(&env)
+				r.Body.Close() //nolint:errcheck
+				if decodeErr != nil {
+					return fmt.Errorf("decode env: %w", decodeErr)
+				}
+
+				if env.Status != environment.StatusProvisioning {
+					fmt.Printf("\nEnvironment %s — status: %s\n", env.ID[:8], env.Status)
+					return nil
+				}
+				fmt.Printf("  [%s] still provisioning...\r", time.Now().Format("15:04:05"))
+			}
 		},
 	}
 	cmd.Flags().StringVar(&owner, "owner", "", "Owner name (required)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Simulate AWS calls with delays instead of real API calls")
 	cmd.Flags().BoolVar(&failAtHealth, "fail-at-health", false, "Inject failure at health validation step (demo moment 2)")
-	cmd.Flags().StringVar(&dbPath, "db", envOrDefault("DB_PATH", "env-forge.db"), "BoltDB path")
-	cmd.Flags().StringVar(&conductorAddr, "conductor", envOrDefault("CONDUCTOR_ADDR", "localhost:8080"), "saga-conductor gRPC address")
-	cmd.Flags().StringVar(&selfURL, "self-url", envOrDefault("SELF_URL", "http://localhost:9090"), "This server's HTTP base URL (reachable by conductor)")
+	cmd.Flags().StringVar(&forgeURL, "forge-url", envOrDefault("SELF_URL", "http://localhost:9090"), "forge serve HTTP base URL")
 	if err := cmd.MarkFlagRequired("owner"); err != nil {
 		panic(err) // only fails if "owner" flag was not registered above
 	}
@@ -169,17 +206,13 @@ func newCreateCmd() *cobra.Command {
 // ── destroy ──────────────────────────────────────────────────────────────────
 
 func newDestroyCmd() *cobra.Command {
-	var (
-		dbPath        string
-		conductorAddr string
-		selfURL       string
-	)
+	var dbPath string
 	cmd := &cobra.Command{
 		Use:   "destroy <env-id-prefix>",
 		Short: "Destroy a provisioned environment (triggers saga compensation)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := environment.Open(dbPath)
+			store, err := environment.OpenReadOnly(dbPath)
 			if err != nil {
 				return fmt.Errorf("open store: %w", err)
 			}
@@ -194,19 +227,12 @@ func newDestroyCmd() *cobra.Command {
 				return fmt.Errorf("environment %s has no associated saga", env.ID[:8])
 			}
 
-			_, err = conductor.New(conductorAddr, selfURL)
-			if err != nil {
-				return err
-			}
-
 			fmt.Printf("Destroying environment %s — saga %s will be aborted.\n", env.ID[:8], env.SagaID)
 			fmt.Println("(Use `forge status <env-id>` to monitor compensation progress.)")
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&dbPath, "db", envOrDefault("DB_PATH", "env-forge.db"), "BoltDB path")
-	cmd.Flags().StringVar(&conductorAddr, "conductor", envOrDefault("CONDUCTOR_ADDR", "localhost:8080"), "saga-conductor gRPC address")
-	cmd.Flags().StringVar(&selfURL, "self-url", envOrDefault("SELF_URL", "http://localhost:9090"), "This server's HTTP base URL")
 	return cmd
 }
 
@@ -221,7 +247,7 @@ func newListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List all environments",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			store, err := environment.Open(dbPath)
+			store, err := environment.OpenReadOnly(dbPath)
 			if err != nil {
 				return fmt.Errorf("open store: %w", err)
 			}
@@ -263,7 +289,7 @@ func newStatusCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 
-			store, err := environment.Open(dbPath)
+			store, err := environment.OpenReadOnly(dbPath)
 			if err != nil {
 				return fmt.Errorf("open store: %w", err)
 			}
@@ -305,6 +331,14 @@ func newStatusCmd() *cobra.Command {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// conductorProvisioner adapts *conductor.Client to the server.Provisioner interface.
+type conductorProvisioner struct{ c *conductor.Client }
+
+func (p *conductorProvisioner) Provision(ctx context.Context, env *environment.Environment) error {
+	_, err := p.c.Provision(ctx, env)
+	return err
+}
 
 // buildSteps constructs the ordered slice of saga steps. When awsC is nil
 // (no AWS credentials), steps will use dry-run mode based on env.DryRun.
