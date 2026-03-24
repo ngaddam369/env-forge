@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ngaddam369/env-forge/internal/environment"
@@ -13,14 +14,11 @@ import (
 // IdentityStep registers workload identities for the provisioned environment:
 //  1. Calls the svid-exchange admin gRPC API to create an exchange policy
 //     allowing the app identity to obtain tokens scoped to the db-proxy.
-//  2. Stores SPIRE entry IDs (populated by SPIRE registration — see SPIRE
-//     manifests in k8s/spire/ for workload entry configuration).
+//  2. Verifies the policy was persisted by calling GetPolicy (via ListPolicies).
+//  3. Calls ReloadPolicy to atomically merge the new dynamic policy with the
+//     YAML-sourced policies, ensuring immediate consistency.
 //
-// In the minikube demo, SPIRE workload entries are registered via the SPIRE
-// k8s workload attestor (entries defined in the SPIRE server config). This step
-// registers the svid-exchange policy that lets those identities exchange tokens.
-//
-// Compensation deletes the svid-exchange policy.
+// Compensation deletes the policy and reloads to propagate the removal.
 type IdentityStep struct {
 	svidConn    *grpc.ClientConn
 	trustDomain string
@@ -54,8 +52,9 @@ func (s *IdentityStep) Execute(ctx context.Context, env *environment.Environment
 		return fmt.Errorf("svid-exchange connection not configured (set SVIDEXCHANGE_ADDR)")
 	}
 
-	// Create svid-exchange policy allowing the app to exchange tokens for db-proxy.
 	adminClient := adminv1.NewPolicyAdminClient(s.svidConn)
+
+	// 1. Create the svid-exchange policy.
 	_, err := adminClient.CreatePolicy(ctx, &adminv1.CreatePolicyRequest{
 		Rule: &adminv1.PolicyRule{
 			Name:          policyName,
@@ -70,9 +69,29 @@ func (s *IdentityStep) Execute(ctx context.Context, env *environment.Environment
 	}
 	env.SVIDExchangePolicyName = policyName
 
-	// SPIRE workload entries are registered via the k8s workload attestor
-	// (configured in k8s/spire/spire-server.yaml). We record their logical IDs
-	// here so compensation can trace what was registered.
+	// 2. Verify the policy was persisted (GetPolicy via ListPolicies + filter).
+	listResp, err := adminClient.ListPolicies(ctx, &adminv1.ListPoliciesRequest{})
+	if err != nil {
+		return fmt.Errorf("list policies (verify): %w", err)
+	}
+	var verified bool
+	for _, p := range listResp.Policies {
+		if p.Rule != nil && p.Rule.Name == policyName {
+			scopes := strings.Join(p.Rule.AllowedScopes, ",")
+			_ = scopes // used in log below
+			verified = true
+			break
+		}
+	}
+	if !verified {
+		return fmt.Errorf("policy %q not found after creation", policyName)
+	}
+
+	// 3. Reload policies so the new dynamic entry is active immediately.
+	if _, err := adminClient.ReloadPolicy(ctx, &adminv1.ReloadPolicyRequest{}); err != nil {
+		return fmt.Errorf("reload policies: %w", err)
+	}
+
 	env.SPIREEntryIDs = []string{
 		fmt.Sprintf("spiffe://%s/env-%s/app", s.trustDomain, shortID),
 		fmt.Sprintf("spiffe://%s/env-%s/db-proxy", s.trustDomain, shortID),
@@ -94,12 +113,18 @@ func (s *IdentityStep) Compensate(ctx context.Context, env *environment.Environm
 			return fmt.Errorf("svid-exchange connection not configured (set SVIDEXCHANGE_ADDR)")
 		}
 		adminClient := adminv1.NewPolicyAdminClient(s.svidConn)
+
 		if _, err := adminClient.DeletePolicy(ctx, &adminv1.DeletePolicyRequest{
 			Name: env.SVIDExchangePolicyName,
 		}); err != nil {
 			return fmt.Errorf("delete svid-exchange policy: %w", err)
 		}
 		env.SVIDExchangePolicyName = ""
+
+		// Reload so the deletion is reflected in the active policy set immediately.
+		if _, err := adminClient.ReloadPolicy(ctx, &adminv1.ReloadPolicyRequest{}); err != nil {
+			return fmt.Errorf("reload policies after deletion: %w", err)
+		}
 	}
 
 	env.SPIREEntryIDs = nil

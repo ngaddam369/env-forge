@@ -42,19 +42,29 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
-	defer store.Close() //nolint:errcheck
+	defer func() {
+		if cerr := store.Close(); cerr != nil {
+			log.Error().Err(cerr).Msg("close store")
+		}
+	}()
 
 	c, err := conductor.New(conductorAddr, workerURL)
 	if err != nil {
 		return fmt.Errorf("connect to conductor: %w", err)
 	}
-	defer c.Close() //nolint:errcheck
+	defer func() {
+		if cerr := c.Close(); cerr != nil {
+			log.Error().Err(cerr).Msg("close conductor client")
+		}
+	}()
 
-	var verifier apiserver.Verifier
+	// JWT verifier — nil disables validation (dev mode).
+	// Uses *svidclient.Verifier directly so apiserver can pass it to
+	// svid-exchange NewMiddleware, enabling ClaimsFromContext + scope checks.
+	var verifier *svidclient.Verifier
 	if jwksURL != "" {
-		var raw *svidclient.Verifier
 		for attempt := 1; attempt <= 10; attempt++ {
-			raw, err = svidclient.NewVerifier(ctx, jwksURL)
+			verifier, err = svidclient.NewVerifier(ctx, jwksURL)
 			if err == nil {
 				break
 			}
@@ -67,35 +77,41 @@ func run(ctx context.Context) error {
 		}
 		if err != nil {
 			log.Warn().Err(err).Msg("JWKS unavailable after retries — JWT validation disabled")
+			verifier = nil
 		} else {
-			raw.StartAutoRefresh(ctx, 5*time.Minute)
-			verifier = &jwtVerifier{v: raw}
-			log.Info().Str("jwks_url", jwksURL).Msg("JWT verification enabled")
+			verifier.StartAutoRefresh(ctx, 5*time.Minute)
+			log.Info().Str("jwks_url", jwksURL).Msg("JWT verification enabled (svid-exchange NewMiddleware + scope checks)")
 		}
 	} else {
 		log.Warn().Msg("SVIDEXCHANGE_JWKS_URL not set — JWT validation disabled (dev mode)")
 	}
 
-	provisioner := &conductorProvisioner{c: c}
+	provisioner := &conductorProvisioner{c: c, store: store}
 	audience := fmt.Sprintf("spiffe://%s/ns/default/sa/forge-api", trustDomain)
-	srv := apiserver.New(store, provisioner, verifier, audience, log.Logger)
+
+	srv := apiserver.New(store, provisioner, verifier, audience, c, log.Logger)
 	log.Info().Str("addr", addr).Msg("forge-api listening")
 	return srv.ListenAndServe(ctx, addr)
 }
 
 // conductorProvisioner adapts *conductor.Client to apiserver.Provisioner.
-type conductorProvisioner struct{ c *conductor.Client }
-
-func (p *conductorProvisioner) Provision(ctx context.Context, env *environment.Environment) error {
-	_, err := p.c.Provision(ctx, env)
-	return err
+// It creates the saga first, persists the saga ID so forge status can show step
+// detail, then starts the saga and blocks until it reaches a terminal state.
+type conductorProvisioner struct {
+	c     *conductor.Client
+	store *environment.Store
 }
 
-// jwtVerifier wraps *svidclient.Verifier to satisfy apiserver.Verifier.
-type jwtVerifier struct{ v *svidclient.Verifier }
-
-func (j *jwtVerifier) Verify(token, audience string) error {
-	_, err := j.v.Verify(token, audience)
+func (p *conductorProvisioner) Provision(ctx context.Context, env *environment.Environment) error {
+	sagaID, err := p.c.CreateEnvSaga(ctx, env)
+	if err != nil {
+		return err
+	}
+	env.SagaID = sagaID
+	if err := p.store.Put(env); err != nil {
+		return fmt.Errorf("persist saga ID: %w", err)
+	}
+	_, err = p.c.StartEnvSaga(ctx, sagaID)
 	return err
 }
 

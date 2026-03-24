@@ -14,11 +14,15 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	grpccredentials "github.com/spiffe/go-spiffe/v2/spiffegrpc/grpccredentials"
+	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
+	"github.com/spiffe/go-spiffe/v2/workloadapi"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
 	svidclient "github.com/ngaddam369/svid-exchange/pkg/client"
 
+	"github.com/ngaddam369/env-forge/internal/adminclient"
 	awsclients "github.com/ngaddam369/env-forge/internal/aws"
 	"github.com/ngaddam369/env-forge/internal/environment"
 	"github.com/ngaddam369/env-forge/internal/server"
@@ -59,19 +63,51 @@ func run(ctx context.Context) error {
 		}
 	}
 
-	// gRPC connection to svid-exchange admin API (for identity step).
-	var svidConn *grpc.ClientConn
+	// gRPC connection to svid-exchange admin API (for identity step + admin proxy).
+	// Uses SPIFFE mTLS when the SPIRE socket is available; falls back to insecure
+	// for local dev (--dry-run without SPIRE).
+	var (
+		svidConn *grpc.ClientConn
+		ac       *adminclient.Client
+	)
 	if svidAdminAddr != "" {
+		var adminCreds grpc.DialOption
+		if spiffeSocket != "" {
+			src, srcErr := workloadapi.NewX509Source(ctx, workloadapi.WithClientOptions(
+				workloadapi.WithAddr(spiffeSocket),
+			))
+			if srcErr != nil {
+				log.Warn().Err(srcErr).Msg("X509Source unavailable — admin API using insecure credentials")
+				adminCreds = grpc.WithTransportCredentials(insecure.NewCredentials())
+			} else {
+				defer func() {
+					if cerr := src.Close(); cerr != nil {
+						log.Error().Err(cerr).Msg("close admin X509Source")
+					}
+				}()
+				adminCreds = grpc.WithTransportCredentials(
+					grpccredentials.MTLSClientCredentials(src, src, tlsconfig.AuthorizeAny()),
+				)
+			}
+		} else {
+			adminCreds = grpc.WithTransportCredentials(insecure.NewCredentials())
+		}
 		var err error
-		svidConn, err = grpc.NewClient(svidAdminAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		svidConn, err = grpc.NewClient(svidAdminAddr, adminCreds)
 		if err != nil {
 			return fmt.Errorf("dial svid-exchange admin: %w", err)
 		}
-		defer svidConn.Close() //nolint:errcheck
+		defer func() {
+			if cerr := svidConn.Close(); cerr != nil {
+				log.Error().Err(cerr).Msg("close svid-exchange admin connection")
+			}
+		}()
+		ac = adminclient.NewFromConn(svidConn)
+		log.Info().Str("admin_addr", svidAdminAddr).Msg("svid-exchange admin client ready")
 	}
 
 	allSteps := buildSteps(awsC, svidConn, trustDomain, localEnvDir)
-	srv := server.New(sc, allSteps, log.Logger)
+	srv := server.New(sc, allSteps, ac, log.Logger)
 	log.Info().Str("addr", addr).Msg("forge-worker listening")
 	return srv.ListenAndServe(ctx, addr)
 }
@@ -126,7 +162,11 @@ func (c *remoteStateClient) Get(id string) (*environment.Environment, error) {
 	if err != nil {
 		return nil, fmt.Errorf("GET /internal/envs/%s: %w", id, err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			log.Error().Err(cerr).Str("id", id).Msg("close GET response body")
+		}
+	}()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, environment.ErrNotFound
 	}
@@ -157,7 +197,9 @@ func (c *remoteStateClient) Put(env *environment.Environment) error {
 	if err != nil {
 		return fmt.Errorf("PUT /internal/envs/%s: %w", env.ID, err)
 	}
-	resp.Body.Close() //nolint:errcheck
+	if cerr := resp.Body.Close(); cerr != nil {
+		log.Error().Err(cerr).Str("id", env.ID).Msg("close PUT response body")
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("PUT /internal/envs/%s: status %d", env.ID, resp.StatusCode)
 	}

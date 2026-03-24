@@ -149,11 +149,36 @@ mise install && make build
 # Provision (dry-run, no AWS needed)
 ./bin/forge create --owner alice --dry-run
 
-# Check status
+# Check status — shows step-level detail + failed_step + error_detail
 ./bin/forge status <env-id-prefix>
 
 # List environments
 ./bin/forge list
+
+# ── saga-conductor commands ──────────────────────────────────────────────────
+
+# List sagas (uses ListSagas RPC with status filter and pagination)
+./bin/forge sagas list
+./bin/forge sagas list --status=RUNNING
+./bin/forge sagas list --page-size=10 --cursor=<next-page-token>
+
+# Abort a running saga (AbortSaga — no compensation triggered)
+./bin/forge sagas abort <env-id-prefix>
+
+# ── svid-exchange commands ───────────────────────────────────────────────────
+
+# List exchange policies (YAML-sourced + dynamic)
+# Admin commands route through forge-worker's HTTP proxy (SPIFFE mTLS to svid-exchange admin)
+./bin/forge policies list --worker-url=http://localhost:9091
+
+# Reload YAML policies without restart (ReloadPolicy)
+./bin/forge policies reload --worker-url=http://localhost:9091
+
+# Revoke a JWT by its jti claim (RevokeToken)
+./bin/forge tokens revoke <token-jti> --worker-url=http://localhost:9091 --expires-at=<unix-ts>
+
+# List all revoked tokens (ListRevokedTokens)
+./bin/forge tokens revoked --worker-url=http://localhost:9091
 
 # Override forge-api address
 ./bin/forge create --owner alice --dry-run --forge-url http://localhost:9090
@@ -271,6 +296,237 @@ kubectl set env deploy/forge-worker FORGE_API_URL=http://forge-api.default.svc.c
 ```
 
 **What to observe:** saga-conductor moves through COMPENSATING → COMPENSATION_FAILED after exhausting MaxRetries. The dead-letter state is persistent across conductor restarts.
+
+---
+
+### Demo 6 — ListSagas + Step Detail (saga-conductor)
+
+Demonstrates **saga-conductor's `ListSagas` RPC** with status filtering and pagination, plus **`StepExecution.error_detail`** and **`failed_step`** in `forge status`.
+
+```bash
+# Run two sagas concurrently
+./bin/forge create --owner alice --dry-run &
+./bin/forge create --owner bob   --dry-run &
+
+# List all running sagas (saga-conductor ListSagas with status filter)
+./bin/forge sagas list --status=RUNNING
+# → SAGA ID  STATUS         FAILED STEP  CREATED
+# → abc12345 SAGA_STATUS_RUNNING          2026-03-23T10:00:00Z
+
+# Step-level detail (GetSaga + error_detail + failed_step)
+./bin/forge status <alice-env-id>
+# → Saga abc12345 — SAGA_STATUS_RUNNING
+# →   STEP      STATUS                 STARTED   COMPLETED  ERROR
+# →   vpc       STEP_STATUS_SUCCEEDED  10:00:01  10:00:03
+# →   rds       STEP_STATUS_RUNNING    10:00:04
+
+# Paginate (page_size + cursor)
+./bin/forge sagas list --page-size=1
+# → Next page: --cursor=<token>
+./bin/forge sagas list --page-size=1 --cursor=<token>
+```
+
+**saga-conductor features demonstrated:** `ListSagas` (status filter, pagination), `GetSaga` (steps, failed_step, error_detail JSON parsing).
+
+---
+
+### Demo 7 — AbortSaga (saga-conductor)
+
+Demonstrates **saga-conductor's `AbortSaga` RPC** — moves a saga to ABORTED without triggering compensation.
+
+```bash
+# Start a long-running saga
+./bin/forge create --owner charlie --dry-run &
+sleep 3  # let it reach rds step (5s dry-run delay)
+
+# Abort via forge CLI (proxied through forge-api → saga-conductor AbortSaga)
+./bin/forge sagas abort <charlie-env-id>
+# → Saga abc12345 aborted — status: SAGA_STATUS_ABORTED
+
+./bin/forge status <charlie-env-id>
+# → status: SAGA_STATUS_ABORTED  (no compensation triggered)
+```
+
+**saga-conductor features demonstrated:** `AbortSaga`, ABORTED terminal state.
+
+---
+
+### Demo 8 — Metrics + SSE Dashboard (saga-conductor)
+
+Demonstrates saga-conductor's **Prometheus `/metrics` endpoint** and **real-time SSE `/dashboard`**.
+
+```bash
+kubectl port-forward svc/saga-conductor 8081:8081 &
+
+# Prometheus metrics (saga execution counters + step durations)
+curl -s http://localhost:8081/metrics | grep saga_
+# → saga_executions_total{status="completed"} 3
+# → saga_step_duration_seconds_bucket{...}
+
+# Live SSE dashboard — watch state transitions in real time
+# Run this in one terminal while starting a saga in another
+curl -N http://localhost:8081/dashboard
+# → data: {"id":"abc12345","status":"RUNNING","steps":[...]}
+# → data: {"id":"abc12345","status":"RUNNING","steps":[{"name":"vpc","status":"SUCCEEDED"},...]}
+```
+
+**saga-conductor features demonstrated:** `Observer` interface (powers SSE dashboard), Prometheus `Recorder` interface, `/metrics`, `/dashboard`.
+
+---
+
+### Demo 9 — Graceful Drain (saga-conductor)
+
+Demonstrates saga-conductor's **in-flight saga preservation** during rolling restarts.
+
+```bash
+# Start a saga
+./bin/forge create --owner dave --dry-run &
+
+# Rolling restart conductor while saga is running (drain waits for in-flight)
+kubectl rollout restart deployment/saga-conductor
+
+# Conductor resumes the in-flight saga via Resume() on startup
+kubectl rollout status deployment/saga-conductor
+./bin/forge status <dave-env-id>
+# → status: ready  (all 8 steps completed — saga was not lost)
+```
+
+**saga-conductor features demonstrated:** `Drain()` (stops accepting new sagas, waits for in-flight), `Resume()` (re-drives sagas from RUNNING/COMPENSATING after crash).
+
+---
+
+### Demo 10 — idempotency_key + saga_timeout (saga-conductor)
+
+Demonstrates **`idempotency_key`** preventing duplicate sagas and **`saga_timeout_seconds`** as a safety deadline.
+
+```bash
+# forge-api sends idempotency_key="env-<uuid>" on every CreateSaga.
+# If the CLI retries (network blip), saga-conductor returns the EXISTING saga.
+./bin/forge create --owner eve --dry-run &
+
+# The conductor log shows the idempotency key on CreateSaga:
+kubectl logs -l app=saga-conductor | grep idempotency
+# → INF saga created idempotency_key=env-<uuid> saga_id=abc12345
+
+# Confirm per-step timeouts/retries are set (different per step):
+kubectl logs -l app=saga-conductor | grep "timeout\|max_retries"
+# → vpc: timeout=30s max_retries=2 backoff=500ms
+# → rds: timeout=600s max_retries=3 backoff=2000ms
+```
+
+**saga-conductor features demonstrated:** `idempotency_key` in `CreateSagaRequest`, `saga_timeout_seconds=300`, per-step `timeout_seconds`/`max_retries`/`retry_backoff_ms`.
+
+---
+
+### Demo 11 — Policy Lifecycle + GetPolicy + ReloadPolicy (svid-exchange)
+
+Demonstrates **svid-exchange's full policy admin API** used by the identity step.
+
+```bash
+# Provision an environment — identity step calls CreatePolicy, GetPolicy (verify), ReloadPolicy
+./bin/forge create --owner frank --dry-run
+
+# Watch identity step logs:
+kubectl logs -l app=forge-worker | grep -A3 identity
+# → INF created policy name=policy-env-<id8>
+# → INF verified policy subject=...env/app target=...env/db-proxy scopes=read,write
+# → INF policies reloaded active_count=3
+
+# List all policies via forge-worker HTTP proxy (SPIFFE mTLS → svid-exchange admin gRPC)
+kubectl port-forward svc/forge-worker 9091:9091 &
+./bin/forge policies list --worker-url=http://localhost:9091
+# → NAME                        SOURCE   SUBJECT              TARGET           SCOPES      MAX TTL
+# → forge-worker-to-forge-api   yaml     ...sa/forge-worker   ...sa/forge-api  env:read... 3600s
+# → policy-env-<id8>            dynamic  ...env/app           ...env/db-proxy  read,write  3600s
+
+# grpc_reflection=true lets grpcurl discover services without proto files (direct to admin port)
+kubectl port-forward svc/svid-exchange 8082:8082 &
+grpcurl -plaintext localhost:8082 list
+# → admin.v1.PolicyAdmin
+grpcurl -plaintext localhost:8082 admin.v1.PolicyAdmin/ListPolicies
+
+# Reload policies without restart (ReloadPolicy RPC)
+./bin/forge policies reload --worker-url=http://localhost:9091
+# → Policies reloaded successfully.
+```
+
+**svid-exchange features demonstrated:** `CreatePolicy`, `ListPolicies`, `GetPolicy` (via List+filter), `ReloadPolicy`, `grpc_reflection=true`.
+
+---
+
+### Demo 12 — Token Revocation (svid-exchange)
+
+Demonstrates **svid-exchange's `RevokeToken` and `ListRevokedTokens`** RPCs with BoltDB persistence.
+
+```bash
+# Get a JWT token ID from forge-worker logs (logged after each Exchange call)
+kubectl logs -l app=forge-worker | grep token_id
+# → INF JWT exchanged token_id=abc-jti-xyz expires_at=1711234567
+
+# Revoke the token via forge-worker proxy (persisted in BoltDB across restarts)
+kubectl port-forward svc/forge-worker 9091:9091 &
+./bin/forge tokens revoke abc-jti-xyz \
+  --worker-url=http://localhost:9091 \
+  --expires-at=1711234567
+
+# Confirm it's in the revocation list
+./bin/forge tokens revoked --worker-url=http://localhost:9091
+# → TOKEN ID      EXPIRES AT
+# → abc-jti-xyz   2026-03-23T11:00:00Z
+
+# Any subsequent request using this token is rejected by svid-exchange
+# (even if the token hasn't expired naturally)
+```
+
+**svid-exchange features demonstrated:** `RevokeToken`, `ListRevokedTokens`, BoltDB-persisted revocation.
+
+---
+
+### Demo 13 — Scope Enforcement (svid-exchange)
+
+Demonstrates **`HasScope`/`HasAllScopes`** from the svid-exchange client library enforced in forge-api.
+
+```bash
+# forge-api requires env:read on GET /internal/envs/{id}
+# forge-api requires env:read + env:write on PUT /internal/envs/{id}
+
+# The forge-worker-to-forge-api policy grants ["env:read", "env:write"]
+# so normal provisioning works. Observe the scope check logs:
+kubectl logs -l app=forge-api | grep "authorized\|denied"
+# → INF internal GET authorized sub=spiffe://.../forge-worker scope=env:read env:write
+# → INF internal PUT authorized sub=spiffe://.../forge-worker scope=env:read env:write
+
+# JWT claims are extracted from context via svidclient.ClaimsFromContext
+# and scope-checked via svidclient.HasScope / HasAllScopes
+```
+
+**svid-exchange features demonstrated:** `NewMiddleware` (replaces custom auth), `ClaimsFromContext`, `HasScope`, `HasAllScopes`.
+
+---
+
+### Demo 14 — Key Rotation + Rate Limiting (svid-exchange)
+
+Demonstrates **svid-exchange's `key_rotation_interval`** and **rate limiting** configuration.
+
+```bash
+# key_rotation_interval="1h" is set in server.yaml ConfigMap.
+# After one hour, svid-exchange rotates its signing key automatically.
+kubectl logs -l app=svid-exchange | grep -i rotat
+# → INF signing key rotated new_key_id=k2 old_key_id=k1
+
+# forge-api's JWKS auto-refresh (every 5 minutes) picks up the new key.
+# forge-worker's background token refresh (at 80% TTL) re-fetches tokens
+# signed with the new key. Zero downtime key rotation.
+
+# Rate limiting: 50 RPS, burst 10 (set in server.yaml)
+# Exceeding the limit returns RESOURCE_EXHAUSTED from svid-exchange.
+
+# AUDIT_HMAC_KEY enables tamper-evident audit logging:
+kubectl logs -l app=svid-exchange | grep audit
+# → {"level":"info","event":"exchange","sub":"spiffe://...","hmac":"<sha256>"}
+```
+
+**svid-exchange features demonstrated:** `key_rotation_interval`, `rate_limit_rps`/`rate_limit_burst`, `AUDIT_HMAC_KEY` (tamper-evident audit log), `GRPCCredentials()` (available on exchange client for gRPC-native injection).
 
 ---
 

@@ -20,13 +20,13 @@ data:
     grpc_addr:   ":8080"
     health_addr: ":8081"
     admin_addr:  ":8082"
-    grpc_reflection: false
+    grpc_reflection: true
     otlp_endpoint: ""
     grpc_max_concurrent_streams: 100
     grpc_max_recv_msg_size_kb:   4096
-    rate_limit_rps:   0
-    rate_limit_burst: 0
-    key_rotation_interval: ""
+    rate_limit_rps:   50
+    rate_limit_burst: 10
+    key_rotation_interval: "1h"
     admin_subjects: []
   policy.yaml: |
     # Exchange policies for env-forge provisioned environments.
@@ -85,6 +85,8 @@ spec:
               value: /config/policy.yaml
             - name: SPIFFE_ENDPOINT_SOCKET
               value: "unix:///run/spire/sockets/agent.sock"
+            - name: AUDIT_HMAC_KEY
+              value: "58af228e1a5b1af2d4f558733522075777a8dc90272c6e1dd54468964ec2f476"   # hex-encoded 32-byte key
           volumeMounts:
             - name: data
               mountPath: /data

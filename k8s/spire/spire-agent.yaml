@@ -127,6 +127,8 @@ spec:
               command: [/opt/spire/bin/spire-agent, healthcheck]
             initialDelaySeconds: 15
             periodSeconds: 60
+            timeoutSeconds: 5
+            failureThreshold: 5
       volumes:
         - name: spire-config
           configMap:

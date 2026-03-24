@@ -14,6 +14,7 @@ require (
 	github.com/ngaddam369/svid-exchange v0.0.0-20260321190944-f3b319aaa04c
 	github.com/rs/zerolog v1.34.0
 	github.com/spf13/cobra v1.10.2
+	github.com/spiffe/go-spiffe/v2 v2.6.0
 	go.etcd.io/bbolt v1.4.3
 	google.golang.org/grpc v1.79.3
 )
@@ -42,7 +43,6 @@ require (
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
-	github.com/spiffe/go-spiffe/v2 v2.6.0 // indirect
 	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
