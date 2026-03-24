@@ -17,7 +17,7 @@ echo "Registering SPIRE entries (trust domain: ${TRUST_DOMAIN})"
 # Derive parent ID from the live agent (k8s_psat SPIFFE ID includes the node UID)
 PARENT_ID=$(kubectl exec -n "${SPIRE_NS}" "${SPIRE_SERVER}" -- \
   /opt/spire/bin/spire-server agent list ${SOCKET} 2>/dev/null \
-  | grep "SPIFFE ID" | awk '{print $3}' | head -1)
+  | grep "SPIFFE ID" | awk '{print $NF}' | head -1)
 
 if [[ -z "${PARENT_ID}" ]]; then
   echo "ERROR: No attested SPIRE agent found. Is the agent running?" >&2

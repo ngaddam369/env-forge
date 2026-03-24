@@ -94,7 +94,7 @@ minikube start
 # Pre-load all required images (minikube can't pull from external registries)
 minikube image load ghcr.io/spiffe/spire-server:1.9.6
 minikube image load ghcr.io/spiffe/spire-agent:1.9.6
-minikube image load cgr.io/chainguard/kubectl:latest
+minikube image load cgr.dev/chainguard/kubectl:latest
 minikube image load ghcr.io/ngaddam369/saga-conductor:latest
 minikube image load ghcr.io/ngaddam369/svid-exchange:latest
 
