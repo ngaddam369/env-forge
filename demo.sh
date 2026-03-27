@@ -421,8 +421,13 @@ reset_services_between_demos() {
 
 start_port_forward() {
   local svc="$1" local_port="$2" remote_port="$3" pid_var="$4"
-  kubectl port-forward "svc/$svc" "${local_port}:${remote_port}" \
-    --namespace default >/dev/null 2>&1 &
+  # Run in a restart loop — kubectl port-forward drops after ~minutes of inactivity
+  # or when a pod is replaced. The loop reconnects automatically.
+  (while true; do
+    kubectl port-forward "svc/$svc" "${local_port}:${remote_port}" \
+      --namespace default >/dev/null 2>&1
+    sleep 1
+  done) &
   local pid=$!
   eval "${pid_var}=${pid}"
 }
@@ -463,8 +468,9 @@ get_env_prefix_for_owner() {
   local owner="$1" timeout="${2:-30}"
   local elapsed=0
   while [[ $elapsed -lt $timeout ]]; do
-    local prefix
-    prefix=$("$FORGE_BIN" list 2>/dev/null | awk -v o="$owner" 'NR>1 && $2==o {print $1; exit}')
+    local prefix list_out
+    list_out=$("$FORGE_BIN" list 2>/dev/null) || true
+    prefix=$(echo "$list_out" | awk -v o="$owner" 'NR>1 && $2==o {print $1; exit}')
     if [[ -n "$prefix" ]]; then
       echo "$prefix"
       return 0
@@ -482,7 +488,9 @@ wait_for_saga_state() {
   local elapsed=0
   local status=""
   while [[ $elapsed -lt $timeout ]]; do
-    status=$("$FORGE_BIN" list 2>/dev/null | awk -v o="$owner" 'NR>1 && $2==o {print $3; exit}')
+    local list_out
+    list_out=$("$FORGE_BIN" list 2>/dev/null) || true
+    status=$(echo "$list_out" | awk -v o="$owner" 'NR>1 && $2==o {print $3; exit}')
     if [[ "$status" == "$expected" ]]; then
       echo ""
       return 0
@@ -501,7 +509,9 @@ wait_for_saga_conductor_status() {
   local substr="$1" timeout="${2:-120}"
   local elapsed=0
   while [[ $elapsed -lt $timeout ]]; do
-    if "$FORGE_BIN" sagas list 2>/dev/null | grep -q "$substr"; then
+    local sagas_out
+    sagas_out=$("$FORGE_BIN" sagas list 2>/dev/null) || true
+    if echo "$sagas_out" | grep -q "$substr"; then
       echo ""
       return 0
     fi
@@ -1208,15 +1218,17 @@ demo_04_jwt_token_exchange() {
   pause
 
   subheader "Starting provisioning and watching forge-worker logs for JWT exchange..."
-  echo -e "${CYAN}  \$${RESET} $FORGE_BIN create --owner demo4 --dry-run &"
-  "$FORGE_BIN" create --owner demo4 --dry-run &
-
-  subheader "forge-worker logs (streaming 15s — look for 'JWT token exchange enabled' and token_id):"
-  run_pipe "timeout 15 kubectl logs -f -l app=forge-worker -n default" \
-    "timeout 15 kubectl logs -f -l app=forge-worker -n default 2>/dev/null || true"
+  subheader "forge-worker logs (streaming in background — look for 'JWT exchanged' and token_id):"
+  echo -e "${CYAN}  \$${RESET} kubectl logs -f -l app=forge-worker -n default &"
+  kubectl logs -f -l app=forge-worker -n default 2>/dev/null &
+  local log_pid=$!
   pause
 
-  wait_for_saga_state demo4 ready 90
+  echo -e "${CYAN}  \$${RESET} $FORGE_BIN create --owner demo4 --dry-run"
+  "$FORGE_BIN" create --owner demo4 --dry-run
+  kill "$log_pid" 2>/dev/null || true
+  wait "$log_pid" 2>/dev/null || true
+
   run_cmd "$FORGE_BIN" list
 
   subheader "SPIRE workload entries (confirm forge-worker has SVID):"

@@ -36,7 +36,10 @@ func NewIdentityStep(svidConn *grpc.ClientConn, trustDomain string) *IdentitySte
 func (s *IdentityStep) Name() string { return "identity" }
 
 func (s *IdentityStep) Execute(ctx context.Context, env *environment.Environment, store environment.StateWriter) error {
-	if env.DryRun {
+	// Skip real svid-exchange calls only when both dry-run AND no connection is configured
+	// (local dev mode). When svidConn is set (minikube), always call the real API so the
+	// dynamic policy is visible in ListPolicies — that's the whole point of Demo 3.
+	if env.DryRun && s.svidConn == nil {
 		time.Sleep(1 * time.Second)
 		env.SPIREEntryIDs = []string{"entry-app-dryrun-" + env.ID[:8], "entry-db-dryrun-" + env.ID[:8]}
 		env.SVIDExchangePolicyName = "policy-env-" + env.ID[:8]
@@ -101,7 +104,7 @@ func (s *IdentityStep) Execute(ctx context.Context, env *environment.Environment
 }
 
 func (s *IdentityStep) Compensate(ctx context.Context, env *environment.Environment, store environment.StateWriter) error {
-	if env.DryRun {
+	if env.DryRun && s.svidConn == nil {
 		time.Sleep(1 * time.Second)
 		env.SPIREEntryIDs = nil
 		env.SVIDExchangePolicyName = ""
