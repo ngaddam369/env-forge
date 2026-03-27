@@ -16,6 +16,7 @@ import (
 	"github.com/ngaddam369/env-forge/internal/apiserver"
 	"github.com/ngaddam369/env-forge/internal/conductor"
 	"github.com/ngaddam369/env-forge/internal/environment"
+	pb "github.com/ngaddam369/saga-conductor/proto/saga/v1"
 )
 
 func main() {
@@ -111,8 +112,18 @@ func (p *conductorProvisioner) Provision(ctx context.Context, env *environment.E
 	if err := p.store.Put(env); err != nil {
 		return fmt.Errorf("persist saga ID: %w", err)
 	}
-	_, err = p.c.StartEnvSaga(ctx, sagaID)
-	return err
+	exec, err := p.c.StartEnvSaga(ctx, sagaID)
+	if err != nil {
+		return err
+	}
+	// engine.Start returns (exec, nil) for FAILED sagas (compensation succeeded).
+	// The registry step only runs on success, so we must explicitly mark the env
+	// as failed here — otherwise handleCreateEnv's error path never fires and the
+	// env stays in "provisioning" forever.
+	if exec != nil && exec.Status == pb.SagaStatus_SAGA_STATUS_FAILED {
+		return fmt.Errorf("saga failed: step %q failed, compensation complete", exec.FailedStep)
+	}
+	return nil
 }
 
 func envOrDefault(key, def string) string {
