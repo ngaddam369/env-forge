@@ -22,7 +22,16 @@ make build    # compile forge-api, forge-worker, forge binaries → bin/
 make vet      # go vet ./...
 make lint     # golangci-lint v2 (must be zero issues)
 make test     # race-detector tests + coverage report
+
+# Minikube targets (require minikube running)
+make minikube-images    # build forge Docker images + load all 7 images into minikube
+make minikube-setup     # full setup: images → SPIRE → saga-conductor → svid-exchange → forge (~3 min)
+make minikube-teardown  # restart all pods in the correct order for a clean re-run
 ```
+
+`minikube-setup` depends on `minikube-images` and runs it automatically.
+
+`minikube-teardown` restarts pods in a specific order: svid-exchange → forge-api → forge-worker + saga-conductor. This order is required because svid-exchange generates a new ephemeral signing key on every startup; forge-api must start after svid-exchange to fetch the correct JWKS. See [Minikube Setup](minikube-setup.md#teardown-ordering) for the full explanation.
 
 Binaries are written to `bin/`:
 - `bin/forge` — CLI

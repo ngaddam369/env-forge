@@ -117,6 +117,8 @@ cleanup() {
   kill_if_running "$PF_FORGE_WORKER_PID"
   kill_if_running "$PF_SVID_ADMIN_PID"
   kill_if_running "$PF_SVID_HEALTH_PID"
+  # Kill any kubectl port-forward children that outlived their parent restart-loop subshell.
+  pkill -f "kubectl port-forward" 2>/dev/null || true
   rm -f "$CONDUCTOR_DB" "$FORGE_DB"
 }
 
@@ -1368,6 +1370,7 @@ demo_12_token_revocation() {
   subheader "Provisioning an environment (forge-worker exchanges JWTs during each step)..."
   echo -e "${CYAN}  \$${RESET} $FORGE_BIN create --owner demo12 --dry-run &"
   "$FORGE_BIN" create --owner demo12 --dry-run &
+  local create_pid=$!
   sleep 5
 
   subheader "Extracting a JWT token_id (jti) from svid-exchange audit log:"
@@ -1397,7 +1400,9 @@ demo_12_token_revocation() {
   subheader "List all revoked tokens:"
   run_cmd "$FORGE_BIN" tokens revoked --worker-url=http://localhost:9091
 
-  wait_for_saga_state demo12 ready 90
+  # Wait for the background forge create to finish (avoids polling by owner
+  # which would match stale failed envs from previous demo runs in BoltDB).
+  wait "$create_pid" || true
   success "Demo 12 complete: RevokeToken and ListRevokedTokens with BoltDB persistence."
   pause
 }
@@ -1451,6 +1456,7 @@ demo_13_scope_enforcement() {
   subheader "Starting provisioning and watching forge-api logs for scope checks..."
   echo -e "${CYAN}  \$${RESET} $FORGE_BIN create --owner demo13 --dry-run &"
   "$FORGE_BIN" create --owner demo13 --dry-run &
+  local create_pid=$!
   sleep 5
 
   subheader "forge-api authorization log lines (scope enforcement):"
@@ -1462,7 +1468,7 @@ demo_13_scope_enforcement() {
   info "Both granted via the forge-worker-to-forge-api policy."
   pause
 
-  wait_for_saga_state demo13 ready 90
+  wait "$create_pid" || true
   run_cmd "$FORGE_BIN" list
 
   success "Demo 13 complete: scope enforcement via svid-exchange NewMiddleware demonstrated."

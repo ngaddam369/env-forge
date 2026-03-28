@@ -5,7 +5,7 @@ Demo platform for **[saga-conductor](https://github.com/ngaddam369/saga-conducto
 ## Quick Demo
 
 ```bash
-# Prerequisites: mise, Go 1.26.1
+# Prerequisites: mise, Go 1.26.1, Docker, minikube (for --minikube)
 mise install && make build
 cd ~/go_projects/saga-conductor && make build && cd ~/go_projects/env-forge
 
@@ -13,7 +13,12 @@ cd ~/go_projects/saga-conductor && make build && cd ~/go_projects/env-forge
 ./demo.sh --local
 
 # Full demo including SPIRE + JWT token exchange (requires minikube)
+minikube start
+make minikube-setup   # build images, deploy SPIRE + all services (~3 min)
 ./demo.sh --minikube
+
+# Reset cluster state between demo runs
+make minikube-teardown  # restart all pods with fresh BoltDB state
 
 # All 14 demo moments back-to-back
 ./demo.sh --all
