@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,6 +14,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/ngaddam369/env-forge/internal/environment"
+	"github.com/ngaddam369/env-forge/internal/metrics"
 	pb "github.com/ngaddam369/saga-conductor/proto/saga/v1"
 )
 
@@ -51,6 +53,12 @@ type Server struct {
 	verifier    *svidclient.Verifier // nil → dev mode, skip JWT validation
 	audience    string               // expected JWT aud claim (SPIFFE ID of forge-api)
 	saga        SagaClient           // nil → saga proxy endpoints return 503
+
+	// srvCtx is set in ListenAndServe before the HTTP server starts accepting
+	// connections. Provision goroutines use it so they are cancelled on shutdown.
+	mu     sync.Mutex
+	srvCtx context.Context
+	wg     sync.WaitGroup // tracks in-flight provision goroutines
 }
 
 // New creates a Server and registers all routes.
@@ -85,6 +93,8 @@ func New(store *environment.Store, provisioner Provisioner, verifier *svidclient
 	s.mux.HandleFunc("GET /health/live", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	s.mux.HandleFunc("GET /health/ready", s.handleReady)
+	s.mux.Handle("GET /metrics", metrics.Handler())
 	return s
 }
 
@@ -102,6 +112,17 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		return next
 	}
 	return svidclient.NewMiddleware(s.verifier, s.audience, next)
+}
+
+// handleReady handles GET /health/ready.
+// Returns 503 if the store is not accessible; 200 otherwise.
+func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
+	if _, err := s.store.List(""); err != nil {
+		s.log.Error().Err(err).Msg("readiness check: store not accessible")
+		http.Error(w, "store not ready", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 // handleCreateEnv handles POST /envs/create.
@@ -134,21 +155,38 @@ func (s *Server) handleCreateEnv(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Capture the server lifecycle context so the goroutine is cancelled on shutdown.
+	s.mu.Lock()
+	provCtx := s.srvCtx
+	s.mu.Unlock()
+	if provCtx == nil {
+		provCtx = context.Background()
+	}
+
+	s.wg.Add(1)
 	go func() {
-		if err := s.provisioner.Provision(context.Background(), env); err != nil {
+		defer s.wg.Done()
+		if err := s.provisioner.Provision(provCtx, env); err != nil {
 			s.log.Error().Err(err).Str("env_id", env.ID).Msg("provisioning failed")
+			metrics.SagaOutcome.WithLabelValues("failed").Inc()
 			env.Status = environment.StatusFailed
 			if putErr := s.store.Put(env); putErr != nil {
 				s.log.Error().Err(putErr).Msg("update env status to failed")
 			}
+		} else {
+			metrics.SagaOutcome.WithLabelValues("success").Inc()
 		}
 	}()
 
+	data, err := json.Marshal(map[string]string{"env_id": env.ID})
+	if err != nil {
+		s.log.Error().Err(err).Msg("marshal create response")
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	if err := json.NewEncoder(w).Encode(map[string]string{"env_id": env.ID}); err != nil {
-		s.log.Error().Err(err).Msg("encode create response")
-	}
+	_, _ = w.Write(data)
 }
 
 // handleListEnvs handles GET /envs.
@@ -160,10 +198,14 @@ func (s *Server) handleListEnvs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(envs); err != nil {
-		s.log.Error().Err(err).Msg("encode list response")
+	data, err := json.Marshal(envs)
+	if err != nil {
+		s.log.Error().Err(err).Msg("marshal list response")
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
 }
 
 // handleGetEnv handles GET /envs/{id} — prefix match.
@@ -179,10 +221,14 @@ func (s *Server) handleGetEnv(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(env); err != nil {
-		s.log.Error().Err(err).Msg("encode env response")
+	data, err := json.Marshal(env)
+	if err != nil {
+		s.log.Error().Err(err).Msg("marshal env response")
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
 }
 
 // handleAbortEnv handles POST /envs/{id}/abort.
@@ -212,10 +258,14 @@ func (s *Server) handleAbortEnv(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "abort failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(exec); err != nil {
-		s.log.Error().Err(err).Msg("encode abort response")
+	data, err := json.Marshal(exec)
+	if err != nil {
+		s.log.Error().Err(err).Msg("marshal abort response")
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
 }
 
 // handleGetEnvSaga handles GET /envs/{id}/saga.
@@ -245,10 +295,14 @@ func (s *Server) handleGetEnvSaga(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "get saga failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(exec); err != nil {
-		s.log.Error().Err(err).Msg("encode saga response")
+	data, err := json.Marshal(exec)
+	if err != nil {
+		s.log.Error().Err(err).Msg("marshal saga response")
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
 }
 
 // handleListSagas handles GET /sagas — proxies to saga-conductor ListSagas.
@@ -287,10 +341,14 @@ func (s *Server) handleListSagas(w http.ResponseWriter, r *http.Request) {
 		NextPageToken string              `json:"next_page_token,omitempty"`
 	}{Sagas: sagas, NextPageToken: nextCursor}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		s.log.Error().Err(err).Msg("encode sagas response")
+	data, err := json.Marshal(resp)
+	if err != nil {
+		s.log.Error().Err(err).Msg("marshal sagas response")
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
 }
 
 // handleInternalGetEnv handles GET /internal/envs/{id} — used by forge-worker.
@@ -320,10 +378,14 @@ func (s *Server) handleInternalGetEnv(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(env); err != nil {
-		s.log.Error().Err(err).Msg("encode env (internal)")
+	data, err := json.Marshal(env)
+	if err != nil {
+		s.log.Error().Err(err).Msg("marshal env (internal)")
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
 }
 
 // handleInternalPutEnv handles PUT /internal/envs/{id} — used by forge-worker.
@@ -370,7 +432,15 @@ func (s *Server) findByPrefix(prefix string) (*environment.Environment, error) {
 }
 
 // ListenAndServe starts the HTTP server on addr (e.g. ":9090").
+// It sets the server lifecycle context so provision goroutines are cancelled on
+// shutdown, and waits for all in-flight provisions to complete before returning.
 func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
+	// Store the lifecycle context before accepting any connections so provision
+	// goroutines spawned by handlers can be tied to the server lifetime.
+	s.mu.Lock()
+	s.srvCtx = ctx
+	s.mu.Unlock()
+
 	srv := &http.Server{Addr: addr, Handler: s}
 	go func() {
 		<-ctx.Done()
@@ -381,5 +451,7 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+	// Drain in-flight provision goroutines before releasing resources.
+	s.wg.Wait()
 	return nil
 }

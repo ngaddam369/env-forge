@@ -64,6 +64,9 @@ ln -s /opt/spire-1.9.6/bin/spire-agent /usr/local/bin/spire-agent
 	if err != nil {
 		return fmt.Errorf("run instances: %w", err)
 	}
+	if len(out.Instances) == 0 {
+		return fmt.Errorf("run instances returned empty instance list")
+	}
 
 	env.EC2InstanceID = aws.ToString(out.Instances[0].InstanceId)
 
@@ -134,8 +137,11 @@ func (s *EC2Step) IsAlreadyDone(ctx context.Context, env *environment.Environmen
 	out, err := s.ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 		InstanceIds: []string{env.EC2InstanceID},
 	})
-	if err != nil || len(out.Reservations) == 0 || len(out.Reservations[0].Instances) == 0 {
-		return false, nil //nolint:nilerr
+	if err != nil {
+		return false, fmt.Errorf("describe instances: %w", err)
+	}
+	if len(out.Reservations) == 0 || len(out.Reservations[0].Instances) == 0 {
+		return false, nil
 	}
 	state := out.Reservations[0].Instances[0].State
 	if state == nil {

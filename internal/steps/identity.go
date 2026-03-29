@@ -77,14 +77,23 @@ func (s *IdentityStep) Execute(ctx context.Context, env *environment.Environment
 	if err != nil {
 		return fmt.Errorf("list policies (verify): %w", err)
 	}
+	const wantMaxTTL = int32(3600)
+	wantScopes := []string{"read", "write"}
 	var verified bool
 	for _, p := range listResp.Policies {
-		if p.Rule != nil && p.Rule.Name == policyName {
-			scopes := strings.Join(p.Rule.AllowedScopes, ",")
-			_ = scopes // used in log below
-			verified = true
-			break
+		if p.Rule == nil || p.Rule.Name != policyName {
+			continue
 		}
+		gotScopes := strings.Join(p.Rule.AllowedScopes, ",")
+		wantScopesStr := strings.Join(wantScopes, ",")
+		if gotScopes != wantScopesStr {
+			return fmt.Errorf("policy %q has unexpected scopes %q (want %q)", policyName, gotScopes, wantScopesStr)
+		}
+		if p.Rule.MaxTtl != wantMaxTTL {
+			return fmt.Errorf("policy %q has unexpected max_ttl %d (want %d)", policyName, p.Rule.MaxTtl, wantMaxTTL)
+		}
+		verified = true
+		break
 	}
 	if !verified {
 		return fmt.Errorf("policy %q not found after creation", policyName)

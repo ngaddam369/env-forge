@@ -1,0 +1,14 @@
+---
+# PodDisruptionBudget for forge-worker.
+# Ensures at least one replica is available during voluntary disruptions.
+# Increase minAvailable when running more than one replica.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: forge-worker-pdb
+  namespace: default
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: forge-worker

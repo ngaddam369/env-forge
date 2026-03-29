@@ -25,8 +25,14 @@ metadata:
     app: forge-api
 spec:
   replicas: 1
+  # RollingUpdate ensures zero-downtime rollouts. With a single replica and a
+  # PVC (ReadWriteOnce), maxSurge must be 0 to avoid two pods competing for the
+  # same volume on the same node.
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
   selector:
     matchLabels:
       app: forge-api
@@ -38,8 +44,9 @@ spec:
       serviceAccountName: forge-api
       containers:
         - name: forge-api
+          # Pin to a specific version in production — do not use :latest.
           image: ghcr.io/ngaddam369/env-forge-api:latest
-          imagePullPolicy: Never
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 9090
               name: api
@@ -59,12 +66,36 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          # initialDelaySeconds must accommodate the JWKS retry loop (up to 10
+          # attempts × 3 s = 30 s) plus startup time.
           livenessProbe:
             httpGet:
               path: /health/live
               port: 9090
-            initialDelaySeconds: 5
+            initialDelaySeconds: 45
             periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 6
       volumes:
         - name: data
           persistentVolumeClaim:

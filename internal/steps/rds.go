@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -147,8 +148,13 @@ func (s *RDSStep) IsAlreadyDone(ctx context.Context, env *environment.Environmen
 		DBInstanceIdentifier: aws.String(env.RDSInstanceID),
 	})
 	if err != nil {
-		// Instance does not exist — not done.
-		return false, nil //nolint:nilerr
+		// DBInstanceNotFoundFault means the instance was never created or was
+		// already deleted — treat as not done so Execute can proceed.
+		var notFound *rdstypes.DBInstanceNotFoundFault
+		if errors.As(err, &notFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("describe db instances: %w", err)
 	}
 	if len(out.DBInstances) == 0 {
 		return false, nil

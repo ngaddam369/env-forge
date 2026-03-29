@@ -16,6 +16,8 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// ── helpers ───────────────────────────────────────────────────────────────────
+
 func newTestStore(t *testing.T) *environment.Store {
 	t.Helper()
 	store, err := environment.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -57,54 +59,104 @@ func postStep(t *testing.T, srv http.Handler, path, envID string) *httptest.Resp
 	return rr
 }
 
-func TestServer_ForwardStep_Success(t *testing.T) {
-	store := newTestStore(t)
-	env := newTestEnv("srv01234")
-	_ = store.Put(env)
+// ── step forward / compensate ─────────────────────────────────────────────────
 
-	srv := buildTestServer(t, store)
-
-	rr := postStep(t, srv, "/steps/vpc", env.ID)
-	if rr.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+func TestServer_StepExecution(t *testing.T) {
+	cases := []struct {
+		name       string
+		path       string
+		setupEnv   func(*environment.Environment)
+		wantStatus int
+		checkStore func(t *testing.T, env *environment.Environment)
+	}{
+		{
+			name:       "forward vpc sets VPCID",
+			path:       "/steps/vpc",
+			wantStatus: http.StatusOK,
+			checkStore: func(t *testing.T, env *environment.Environment) {
+				t.Helper()
+				if env.VPCID == "" {
+					t.Error("expected VPCID to be set in store after forward")
+				}
+			},
+		},
+		{
+			name: "compensate vpc clears VPCID",
+			path: "/steps/vpc/compensate",
+			setupEnv: func(env *environment.Environment) {
+				env.VPCID = "vpc-already"
+			},
+			wantStatus: http.StatusOK,
+			checkStore: func(t *testing.T, env *environment.Environment) {
+				t.Helper()
+				if env.VPCID != "" {
+					t.Errorf("expected VPCID cleared after compensate, got %q", env.VPCID)
+				}
+			},
+		},
+		{
+			name: "forward vpc idempotent when already done",
+			path: "/steps/vpc",
+			setupEnv: func(env *environment.Environment) {
+				env.VPCID = "vpc-already"
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "forward registry sets status=ready",
+			path:       "/steps/registry",
+			wantStatus: http.StatusOK,
+			checkStore: func(t *testing.T, env *environment.Environment) {
+				t.Helper()
+				if env.Status != environment.StatusReady {
+					t.Errorf("expected status=ready, got %s", env.Status)
+				}
+			},
+		},
+		{
+			name:       "health step fails when FailAtHealth=true",
+			path:       "/steps/health",
+			setupEnv:   func(env *environment.Environment) { env.FailAtHealth = true },
+			wantStatus: http.StatusInternalServerError,
+		},
 	}
 
-	// Env should have VPCID set in store.
-	updated, _ := store.Get(env.ID)
-	if updated.VPCID == "" {
-		t.Error("VPCID not set in store after forward step")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+			env := newTestEnv("srvXXXX")
+			if tc.setupEnv != nil {
+				tc.setupEnv(env)
+			}
+			_ = store.Put(env)
+
+			srv := buildTestServer(t, store)
+			rr := postStep(t, srv, tc.path, env.ID)
+
+			if rr.Code != tc.wantStatus {
+				t.Errorf("status=%d, want %d: %s", rr.Code, tc.wantStatus, rr.Body.String())
+			}
+			if tc.checkStore != nil {
+				updated, err := store.Get(env.ID)
+				if err != nil {
+					t.Fatalf("get from store: %v", err)
+				}
+				tc.checkStore(t, updated)
+			}
+		})
 	}
 }
 
-func TestServer_CompensateStep_Success(t *testing.T) {
+// TestServer_ForwardStep_Idempotent calls the same endpoint twice to confirm
+// the second call is a no-op, not a re-execution.
+func TestServer_ForwardStep_Idempotent(t *testing.T) {
 	store := newTestStore(t)
-	env := newTestEnv("srv02345")
+	env := newTestEnv("srv03456")
 	env.VPCID = "vpc-already"
 	_ = store.Put(env)
 
 	srv := buildTestServer(t, store)
-
-	rr := postStep(t, srv, "/steps/vpc/compensate", env.ID)
-	if rr.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d: %s", rr.Code, rr.Body.String())
-	}
-
-	updated, _ := store.Get(env.ID)
-	if updated.VPCID != "" {
-		t.Error("VPCID should be cleared after compensation")
-	}
-}
-
-func TestServer_ForwardStep_Idempotent(t *testing.T) {
-	store := newTestStore(t)
-	env := newTestEnv("srv03456")
-	env.VPCID = "vpc-already" // already done
-	_ = store.Put(env)
-
-	srv := buildTestServer(t, store)
-
-	// POST twice — both should return 200 without re-executing.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		rr := postStep(t, srv, "/steps/vpc", env.ID)
 		if rr.Code != http.StatusOK {
 			t.Errorf("attempt %d: expected 200, got %d", i+1, rr.Code)
@@ -112,76 +164,108 @@ func TestServer_ForwardStep_Idempotent(t *testing.T) {
 	}
 }
 
-func TestServer_UnknownEnvID_Returns404(t *testing.T) {
-	store := newTestStore(t)
-	srv := buildTestServer(t, store)
+// ── error cases ───────────────────────────────────────────────────────────────
 
-	rr := postStep(t, srv, "/steps/vpc", "nonexistent-id-aaaa-bbbb-cccc")
-	if rr.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", rr.Code)
+func TestServer_ErrorCases(t *testing.T) {
+	cases := []struct {
+		name       string
+		buildReq   func(envID string) *http.Request
+		wantStatus int
+	}{
+		{
+			name: "unknown env ID returns 404",
+			buildReq: func(_ string) *http.Request {
+				body, _ := json.Marshal(map[string]string{"env_id": "nonexistent-id-aaaa-bbbb-cccc"})
+				req := httptest.NewRequest(http.MethodPost, "/steps/vpc", bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				return req
+			},
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name: "unknown step name returns non-200",
+			buildReq: func(envID string) *http.Request {
+				body, _ := json.Marshal(map[string]string{"env_id": envID})
+				req := httptest.NewRequest(http.MethodPost, "/steps/nonexistent", bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				return req
+			},
+			// ServeMux returns 405 for unregistered patterns in newer Go versions.
+			wantStatus: -1, // any non-200
+		},
+		{
+			name: "malformed JSON body returns 400",
+			buildReq: func(_ string) *http.Request {
+				return httptest.NewRequest(http.MethodPost, "/steps/vpc", bytes.NewReader([]byte("not-json")))
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "missing env_id in body returns 400",
+			buildReq: func(_ string) *http.Request {
+				body, _ := json.Marshal(map[string]string{})
+				req := httptest.NewRequest(http.MethodPost, "/steps/vpc", bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				return req
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+			env := newTestEnv("errXXXX")
+			_ = store.Put(env)
+
+			srv := buildTestServer(t, store)
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, tc.buildReq(env.ID))
+
+			if tc.wantStatus == -1 {
+				if rr.Code == http.StatusOK {
+					t.Errorf("expected non-200, got 200")
+				}
+			} else if rr.Code != tc.wantStatus {
+				t.Errorf("status=%d, want %d: %s", rr.Code, tc.wantStatus, rr.Body.String())
+			}
+		})
 	}
 }
 
-func TestServer_UnknownStep_Returns404(t *testing.T) {
-	store := newTestStore(t)
-	env := newTestEnv("srv04567")
-	_ = store.Put(env)
+// ── health endpoints ──────────────────────────────────────────────────────────
 
-	srv := buildTestServer(t, store)
+func TestServer_HealthEndpoints(t *testing.T) {
+	cases := []struct {
+		name       string
+		path       string
+		wantStatus int
+	}{
+		{name: "live returns 200", path: "/health/live", wantStatus: http.StatusOK},
+		{name: "ready returns 200", path: "/health/ready", wantStatus: http.StatusOK},
+	}
 
-	body, _ := json.Marshal(map[string]string{"env_id": env.ID})
-	req := httptest.NewRequest(http.MethodPost, "/steps/nonexistent", bytes.NewReader(body))
-	rr := httptest.NewRecorder()
-	srv.ServeHTTP(rr, req)
-	// net/http ServeMux returns 405 (method not allowed) for unregistered patterns
-	// depending on Go version; check for non-200.
-	if rr.Code == http.StatusOK {
-		t.Errorf("expected non-200 for unknown step, got 200")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+			srv := buildTestServer(t, store)
+
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, req)
+
+			if rr.Code != tc.wantStatus {
+				t.Errorf("status=%d, want %d", rr.Code, tc.wantStatus)
+			}
+		})
 	}
 }
 
-func TestServer_BadPayload_Returns400(t *testing.T) {
-	store := newTestStore(t)
-	srv := buildTestServer(t, store)
-
-	req := httptest.NewRequest(http.MethodPost, "/steps/vpc", bytes.NewReader([]byte("not-json")))
-	rr := httptest.NewRecorder()
-	srv.ServeHTTP(rr, req)
-	if rr.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", rr.Code)
-	}
-}
-
-func TestServer_HealthLive(t *testing.T) {
-	store := newTestStore(t)
-	srv := buildTestServer(t, store)
-
-	req := httptest.NewRequest(http.MethodGet, "/health/live", nil)
-	rr := httptest.NewRecorder()
-	srv.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Errorf("expected 200 from /health/live, got %d", rr.Code)
-	}
-}
-
-func TestServer_FailAtHealth_Returns500(t *testing.T) {
-	store := newTestStore(t)
-	env := newTestEnv("srv05678")
-	env.FailAtHealth = true
-	_ = store.Put(env)
-
-	srv := buildTestServer(t, store)
-
-	rr := postStep(t, srv, "/steps/health", env.ID)
-	if rr.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 when FailAtHealth=true, got %d", rr.Code)
-	}
-}
+// ── concurrency ───────────────────────────────────────────────────────────────
 
 func TestServer_ConcurrentRequests(t *testing.T) {
 	store := newTestStore(t)
 
-	// Create 5 environments.
 	envs := make([]*environment.Environment, 5)
 	for i := range envs {
 		envs[i] = newTestEnv("conc0000")

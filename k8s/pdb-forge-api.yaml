@@ -1,0 +1,15 @@
+---
+# PodDisruptionBudget for forge-api.
+# Ensures at least one replica is available during voluntary disruptions
+# (node drains, cluster upgrades). Increase minAvailable when running
+# more than one replica.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: forge-api-pdb
+  namespace: default
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: forge-api

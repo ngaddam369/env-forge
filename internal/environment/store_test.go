@@ -9,6 +9,8 @@ import (
 	"github.com/ngaddam369/env-forge/internal/environment"
 )
 
+// ── helpers ───────────────────────────────────────────────────────────────────
+
 func newTestStore(t *testing.T) *environment.Store {
 	t.Helper()
 	dir := t.TempDir()
@@ -29,27 +31,41 @@ func newEnv(id, owner string) *environment.Environment {
 	}
 }
 
+// ── Put / Get ─────────────────────────────────────────────────────────────────
+
 func TestStore_PutAndGet(t *testing.T) {
-	store := newTestStore(t)
-	env := newEnv("aaaa-bbbb-cccc-dddd", "alice")
-
-	if err := store.Put(env); err != nil {
-		t.Fatalf("Put: %v", err)
+	cases := []struct {
+		name  string
+		id    string
+		owner string
+	}{
+		{name: "basic env", id: "aaaa-bbbb-cccc-dddd", owner: "alice"},
+		{name: "special chars in owner", id: "eeee-ffff-0000-1111", owner: "bob@example.com"},
 	}
 
-	got, err := store.Get(env.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if got.ID != env.ID {
-		t.Errorf("ID mismatch: got %s, want %s", got.ID, env.ID)
-	}
-	if got.Owner != env.Owner {
-		t.Errorf("Owner mismatch: got %s, want %s", got.Owner, env.Owner)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+			env := newEnv(tc.id, tc.owner)
+
+			if err := store.Put(env); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+			got, err := store.Get(env.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.ID != env.ID {
+				t.Errorf("ID=%q, want %q", got.ID, env.ID)
+			}
+			if got.Owner != env.Owner {
+				t.Errorf("Owner=%q, want %q", got.Owner, env.Owner)
+			}
+		})
 	}
 }
 
-func TestStore_GetNotFound(t *testing.T) {
+func TestStore_Get_NotFound(t *testing.T) {
 	store := newTestStore(t)
 	_, err := store.Get("does-not-exist")
 	if err == nil {
@@ -57,85 +73,182 @@ func TestStore_GetNotFound(t *testing.T) {
 	}
 }
 
+// ── List with status filter ───────────────────────────────────────────────────
+
 func TestStore_List(t *testing.T) {
-	store := newTestStore(t)
-
-	envs := []*environment.Environment{
-		newEnv("id-1", "alice"),
-		newEnv("id-2", "bob"),
-		newEnv("id-3", "carol"),
-	}
-	envs[1].Status = environment.StatusReady
-
-	for _, e := range envs {
-		if err := store.Put(e); err != nil {
-			t.Fatalf("Put: %v", err)
-		}
+	// Seed a fixed set of environments with mixed statuses.
+	seed := []struct {
+		id     string
+		status string
+	}{
+		{"id-1", environment.StatusProvisioning},
+		{"id-2", environment.StatusReady},
+		{"id-3", environment.StatusFailed},
+		{"id-4", environment.StatusReady},
 	}
 
-	all, err := store.List("")
-	if err != nil {
-		t.Fatalf("List all: %v", err)
-	}
-	if len(all) != 3 {
-		t.Errorf("expected 3 environments, got %d", len(all))
+	cases := []struct {
+		name        string
+		filter      string
+		wantIDs     []string
+		wantCount   int
+	}{
+		{
+			name:      "no filter returns all",
+			filter:    "",
+			wantCount: 4,
+		},
+		{
+			name:      "filter by ready",
+			filter:    environment.StatusReady,
+			wantCount: 2,
+			wantIDs:   []string{"id-2", "id-4"},
+		},
+		{
+			name:      "filter by provisioning",
+			filter:    environment.StatusProvisioning,
+			wantCount: 1,
+			wantIDs:   []string{"id-1"},
+		},
+		{
+			name:      "filter by failed",
+			filter:    environment.StatusFailed,
+			wantCount: 1,
+			wantIDs:   []string{"id-3"},
+		},
+		{
+			name:      "filter by destroyed returns empty",
+			filter:    environment.StatusDestroyed,
+			wantCount: 0,
+		},
 	}
 
-	ready, err := store.List(environment.StatusReady)
-	if err != nil {
-		t.Fatalf("List ready: %v", err)
-	}
-	if len(ready) != 1 || ready[0].ID != "id-2" {
-		t.Errorf("expected 1 ready env id-2, got %v", ready)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+			for _, s := range seed {
+				e := newEnv(s.id, "user")
+				e.Status = s.status
+				if err := store.Put(e); err != nil {
+					t.Fatalf("Put %s: %v", s.id, err)
+				}
+			}
+
+			got, err := store.List(tc.filter)
+			if err != nil {
+				t.Fatalf("List(%q): %v", tc.filter, err)
+			}
+			if len(got) != tc.wantCount {
+				t.Errorf("got %d envs, want %d", len(got), tc.wantCount)
+			}
+			if len(tc.wantIDs) > 0 {
+				gotIDs := make(map[string]bool, len(got))
+				for _, e := range got {
+					gotIDs[e.ID] = true
+				}
+				for _, id := range tc.wantIDs {
+					if !gotIDs[id] {
+						t.Errorf("expected env %q in results", id)
+					}
+				}
+			}
+		})
 	}
 }
+
+// ── Delete ────────────────────────────────────────────────────────────────────
 
 func TestStore_Delete(t *testing.T) {
-	store := newTestStore(t)
-	env := newEnv("del-id", "alice")
+	cases := []struct {
+		name    string
+		seedID  string
+		delID   string
+		wantErr bool // true → Delete should return an error
+	}{
+		{
+			name:   "delete existing env",
+			seedID: "del-id",
+			delID:  "del-id",
+		},
+		// Deleting a non-existent ID is not an error in BoltDB (no-op).
+		{
+			name:   "delete non-existent env is silent",
+			seedID: "",
+			delID:  "ghost-id",
+		},
+	}
 
-	if err := store.Put(env); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
-	if err := store.Delete(env.ID); err != nil {
-		t.Fatalf("Delete: %v", err)
-	}
-	if _, err := store.Get(env.ID); err == nil {
-		t.Fatal("expected ErrNotFound after Delete, got nil")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+			if tc.seedID != "" {
+				if err := store.Put(newEnv(tc.seedID, "alice")); err != nil {
+					t.Fatalf("Put: %v", err)
+				}
+			}
+
+			err := store.Delete(tc.delID)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected error from Delete, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if tc.seedID != "" && tc.seedID == tc.delID {
+				if _, err := store.Get(tc.delID); err == nil {
+					t.Fatal("expected ErrNotFound after Delete, got nil")
+				}
+			}
+		})
 	}
 }
 
-func TestStore_Put_UpdatesTimestamp(t *testing.T) {
-	store := newTestStore(t)
-	env := newEnv("ts-id", "alice")
+// ── Put updates timestamp ─────────────────────────────────────────────────────
 
-	if err := store.Put(env); err != nil {
-		t.Fatalf("first Put: %v", err)
+func TestStore_Put_UpdatesFields(t *testing.T) {
+	cases := []struct {
+		name          string
+		initialStatus string
+		updatedStatus string
+	}{
+		{name: "provisioning → ready", initialStatus: environment.StatusProvisioning, updatedStatus: environment.StatusReady},
+		{name: "ready → failed", initialStatus: environment.StatusReady, updatedStatus: environment.StatusFailed},
 	}
-	first, _ := store.Get(env.ID)
 
-	env.Status = environment.StatusReady
-	if err := store.Put(env); err != nil {
-		t.Fatalf("second Put: %v", err)
-	}
-	second, _ := store.Get(env.ID)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+			env := newEnv("ts-id", "alice")
+			env.Status = tc.initialStatus
+			if err := store.Put(env); err != nil {
+				t.Fatalf("first Put: %v", err)
+			}
+			first, _ := store.Get(env.ID)
 
-	if !second.UpdatedAt.After(first.UpdatedAt) || second.UpdatedAt.Equal(time.Time{}) {
-		// Timestamps may be equal if the test runs very fast; allow equal too.
-		if !second.UpdatedAt.Equal(first.UpdatedAt) {
-			t.Errorf("UpdatedAt not progressed: first=%v second=%v", first.UpdatedAt, second.UpdatedAt)
-		}
-	}
-	if second.Status != environment.StatusReady {
-		t.Errorf("Status not persisted: got %s", second.Status)
+			env.Status = tc.updatedStatus
+			if err := store.Put(env); err != nil {
+				t.Fatalf("second Put: %v", err)
+			}
+			second, _ := store.Get(env.ID)
+
+			if second.Status != tc.updatedStatus {
+				t.Errorf("Status=%q, want %q", second.Status, tc.updatedStatus)
+			}
+			// UpdatedAt must not regress.
+			if second.UpdatedAt.Before(first.UpdatedAt) {
+				t.Errorf("UpdatedAt regressed: first=%v second=%v", first.UpdatedAt, second.UpdatedAt)
+			}
+		})
 	}
 }
+
+// ── persistence across open/close ────────────────────────────────────────────
 
 func TestStore_Persistence(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "persistent.db")
 
-	// Write in first store instance.
 	store1, err := environment.Open(dbPath)
 	if err != nil {
 		t.Fatalf("open store1: %v", err)
@@ -149,7 +262,6 @@ func TestStore_Persistence(t *testing.T) {
 		t.Fatalf("Close store1: %v", err)
 	}
 
-	// Read in second store instance (simulates restart).
 	store2, err := environment.Open(dbPath)
 	if err != nil {
 		t.Fatalf("open store2: %v", err)
@@ -161,26 +273,27 @@ func TestStore_Persistence(t *testing.T) {
 		t.Fatalf("Get after reopen: %v", err)
 	}
 	if got.VPCID != "vpc-123" {
-		t.Errorf("VPCID not persisted: got %s", got.VPCID)
+		t.Errorf("VPCID=%q, want %q", got.VPCID, "vpc-123")
 	}
 }
 
-func TestStore_DeleteMissingFile(t *testing.T) {
-	// Ensure we can open a non-existent file (creates it).
+// ── file creation ─────────────────────────────────────────────────────────────
+
+func TestStore_CreatesFileOnOpen(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "new.db")
 
 	if _, err := os.Stat(dbPath); err == nil {
-		t.Fatalf("db file should not exist yet")
+		t.Fatal("db file should not exist before Open")
 	}
 
 	store, err := environment.Open(dbPath)
 	if err != nil {
-		t.Fatalf("open: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	defer store.Close() //nolint:errcheck
 
 	if _, err := os.Stat(dbPath); err != nil {
-		t.Errorf("db file not created: %v", err)
+		t.Errorf("db file not created after Open: %v", err)
 	}
 }

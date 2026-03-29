@@ -10,7 +10,9 @@ import (
 
 	"github.com/ngaddam369/env-forge/internal/adminclient"
 	"github.com/ngaddam369/env-forge/internal/environment"
+	"github.com/ngaddam369/env-forge/internal/metrics"
 	"github.com/ngaddam369/env-forge/internal/steps"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 )
 
@@ -50,6 +52,10 @@ func New(store environment.StateClient, allSteps []steps.Step, ac *adminclient.C
 	s.mux.HandleFunc("GET /health/live", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	s.mux.HandleFunc("GET /health/ready", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	s.mux.Handle("GET /metrics", metrics.Handler())
 	// Admin proxy endpoints — forward to svid-exchange admin gRPC via SPIFFE mTLS.
 	s.mux.HandleFunc("GET /admin/policies", s.handleListPolicies)
 	s.mux.HandleFunc("POST /admin/policies/reload", s.handleReloadPolicies)
@@ -121,16 +127,35 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, stepName string,
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		if err := step.Execute(ctx, env, s.store); err != nil {
+		execTimer := prometheus.NewTimer(prometheus.ObserverFunc(func(d float64) {
+			result := "ok"
+			if err != nil {
+				result = "error"
+			}
+			metrics.StepDuration.WithLabelValues(stepName, "execute", result).Observe(d)
+		}))
+		err = step.Execute(ctx, env, s.store)
+		execTimer.ObserveDuration()
+		if err != nil {
 			log.Error().Err(err).Msg("step execute failed")
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		log.Info().Msg("step executed successfully")
 	} else {
-		if err := step.Compensate(ctx, env, s.store); err != nil {
-			log.Error().Err(err).Msg("step compensate failed")
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		var compErr error
+		compTimer := prometheus.NewTimer(prometheus.ObserverFunc(func(d float64) {
+			result := "ok"
+			if compErr != nil {
+				result = "error"
+			}
+			metrics.StepDuration.WithLabelValues(stepName, "compensate", result).Observe(d)
+		}))
+		compErr = step.Compensate(ctx, env, s.store)
+		compTimer.ObserveDuration()
+		if compErr != nil {
+			log.Error().Err(compErr).Msg("step compensate failed")
+			http.Error(w, compErr.Error(), http.StatusInternalServerError)
 			return
 		}
 		log.Info().Msg("step compensated successfully")

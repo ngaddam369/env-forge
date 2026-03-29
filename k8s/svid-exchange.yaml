@@ -73,8 +73,9 @@ spec:
       serviceAccountName: svid-exchange
       containers:
         - name: svid-exchange
+          # Pin to a specific version in production — do not use :latest.
           image: ghcr.io/ngaddam369/svid-exchange:latest
-          imagePullPolicy: Never
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
               name: grpc
@@ -88,7 +89,10 @@ spec:
             - name: SPIFFE_ENDPOINT_SOCKET
               value: "unix:///run/spire/sockets/agent.sock"
             - name: AUDIT_HMAC_KEY
-              value: "58af228e1a5b1af2d4f558733522075777a8dc90272c6e1dd54468964ec2f476"   # hex-encoded 32-byte key
+              valueFrom:
+                secretKeyRef:
+                  name: svid-exchange-secrets
+                  key: audit-hmac-key
           volumeMounts:
             - name: data
               mountPath: /data
@@ -97,6 +101,20 @@ spec:
             - name: spire-agent-socket
               mountPath: /run/spire/sockets
               readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           readinessProbe:
             httpGet:
               path: /health/live

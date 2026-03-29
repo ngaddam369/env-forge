@@ -26,6 +26,11 @@ metadata:
     app: env-forge
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
   selector:
     matchLabels:
       app: env-forge
@@ -36,7 +41,9 @@ spec:
     spec:
       containers:
         - name: env-forge
+          # Pin to a specific version in production — do not use :latest.
           image: ghcr.io/ngaddam369/env-forge:latest
+          imagePullPolicy: IfNotPresent
           args:
             - serve
           ports:
@@ -79,12 +86,34 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           livenessProbe:
             httpGet:
               path: /health/live
               port: 9090
-            initialDelaySeconds: 5
+            initialDelaySeconds: 15
             periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 6
       volumes:
         - name: data
           persistentVolumeClaim:

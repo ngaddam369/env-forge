@@ -25,8 +25,9 @@ spec:
       serviceAccountName: forge-worker
       containers:
         - name: forge-worker
+          # Pin to a specific version in production — do not use :latest.
           image: ghcr.io/ngaddam369/env-forge-worker:latest
-          imagePullPolicy: Never
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 9091
               name: worker
@@ -43,8 +44,9 @@ spec:
               value: "svid-exchange.default.svc.cluster.local:8082"
             - name: TRUST_DOMAIN
               value: "cluster.local"
+            # Use /envfiles (emptyDir) instead of /tmp so readOnlyRootFilesystem works.
             - name: LOCAL_ENV_DIR
-              value: /tmp/envfiles
+              value: /envfiles
             # AWS credentials — remove if using --dry-run only
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
@@ -68,17 +70,43 @@ spec:
             - name: spire-agent-socket
               mountPath: /run/spire/sockets
               readOnly: true
+            - name: envfiles
+              mountPath: /envfiles
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           livenessProbe:
             httpGet:
               path: /health/live
               port: 9091
             initialDelaySeconds: 30
             periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 9091
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 6
       volumes:
         - name: spire-agent-socket
           hostPath:
             path: /run/spire/sockets
             type: Directory
+        - name: envfiles
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

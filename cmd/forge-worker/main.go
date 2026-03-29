@@ -115,7 +115,10 @@ func run(ctx context.Context) error {
 // buildStateClient constructs the RemoteStateClient. When SPIFFE is available,
 // it wires up JWT acquisition via svid-exchange; otherwise dev mode (no auth).
 func buildStateClient(ctx context.Context, apiURL, spiffeSocket, svidAddr string) *remoteStateClient {
-	sc := &remoteStateClient{apiURL: apiURL}
+	sc := &remoteStateClient{
+		apiURL: apiURL,
+		http:   &http.Client{Timeout: 30 * time.Second},
+	}
 
 	if spiffeSocket == "" || svidAddr == "" {
 		log.Warn().Msg("SPIFFE_ENDPOINT_SOCKET or SVIDEXCHANGE_ADDR not set — calling forge-api without JWT (dev mode)")
@@ -148,6 +151,7 @@ type remoteStateClient struct {
 	apiURL   string
 	getToken func(ctx context.Context) (string, error) // nil → dev mode
 	closer   io.Closer                                 // nil unless exchangeClient
+	http     *http.Client
 }
 
 func (c *remoteStateClient) Get(id string) (*environment.Environment, error) {
@@ -158,7 +162,7 @@ func (c *remoteStateClient) Get(id string) (*environment.Environment, error) {
 	if err := c.addAuth(req); err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("GET /internal/envs/%s: %w", id, err)
 	}
@@ -193,7 +197,7 @@ func (c *remoteStateClient) Put(env *environment.Environment) error {
 	if err := c.addAuth(req); err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("PUT /internal/envs/%s: %w", env.ID, err)
 	}

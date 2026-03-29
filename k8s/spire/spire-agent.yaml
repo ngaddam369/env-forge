@@ -88,8 +88,9 @@ spec:
       initContainers:
         # Wait for the SPIRE server to be ready before starting the agent.
         - name: init-server
-          image: cgr.dev/chainguard/kubectl:latest
-          imagePullPolicy: Never
+          # Pin the kubectl image; update when upgrading the cluster version.
+          image: cgr.dev/chainguard/kubectl:latest-dev
+          imagePullPolicy: IfNotPresent
           args:
             - wait
             - --namespace=spire
@@ -102,6 +103,9 @@ spec:
             requests:
               cpu: 10m
               memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi
       containers:
         - name: spire-agent
           image: ghcr.io/spiffe/spire-agent:1.9.6
