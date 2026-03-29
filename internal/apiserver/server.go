@@ -186,7 +186,9 @@ func (s *Server) handleCreateEnv(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	_, _ = w.Write(data)
+	if _, err := w.Write(data); err != nil {
+		s.log.Error().Err(err).Msg("write create response")
+	}
 }
 
 // handleListEnvs handles GET /envs.
@@ -205,7 +207,9 @@ func (s *Server) handleListEnvs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(data)
+	if _, err := w.Write(data); err != nil {
+		s.log.Error().Err(err).Msg("write list response")
+	}
 }
 
 // handleGetEnv handles GET /envs/{id} — prefix match.
@@ -228,7 +232,9 @@ func (s *Server) handleGetEnv(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(data)
+	if _, err := w.Write(data); err != nil {
+		s.log.Error().Err(err).Msg("write env response")
+	}
 }
 
 // handleAbortEnv handles POST /envs/{id}/abort.
@@ -265,7 +271,9 @@ func (s *Server) handleAbortEnv(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(data)
+	if _, err := w.Write(data); err != nil {
+		s.log.Error().Err(err).Msg("write response")
+	}
 }
 
 // handleGetEnvSaga handles GET /envs/{id}/saga.
@@ -302,7 +310,9 @@ func (s *Server) handleGetEnvSaga(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(data)
+	if _, err := w.Write(data); err != nil {
+		s.log.Error().Err(err).Msg("write response")
+	}
 }
 
 // handleListSagas handles GET /sagas — proxies to saga-conductor ListSagas.
@@ -348,7 +358,9 @@ func (s *Server) handleListSagas(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(data)
+	if _, err := w.Write(data); err != nil {
+		s.log.Error().Err(err).Msg("write response")
+	}
 }
 
 // handleInternalGetEnv handles GET /internal/envs/{id} — used by forge-worker.
@@ -385,7 +397,9 @@ func (s *Server) handleInternalGetEnv(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(data)
+	if _, err := w.Write(data); err != nil {
+		s.log.Error().Err(err).Msg("write response")
+	}
 }
 
 // handleInternalPutEnv handles PUT /internal/envs/{id} — used by forge-worker.

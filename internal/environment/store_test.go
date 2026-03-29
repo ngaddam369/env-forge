@@ -88,10 +88,10 @@ func TestStore_List(t *testing.T) {
 	}
 
 	cases := []struct {
-		name        string
-		filter      string
-		wantIDs     []string
-		wantCount   int
+		name      string
+		filter    string
+		wantIDs   []string
+		wantCount int
 	}{
 		{
 			name:      "no filter returns all",

@@ -226,10 +226,10 @@ func TestHandleGetEnv(t *testing.T) {
 
 func TestHealthEndpoints(t *testing.T) {
 	cases := []struct {
-		name        string
-		path        string
-		closeStore  bool // simulate an unhealthy store
-		wantStatus  int
+		name       string
+		path       string
+		closeStore bool // simulate an unhealthy store
+		wantStatus int
 	}{
 		{name: "live returns 200", path: "/health/live", wantStatus: http.StatusOK},
 		{name: "ready returns 200 when store is accessible", path: "/health/ready", wantStatus: http.StatusOK},
